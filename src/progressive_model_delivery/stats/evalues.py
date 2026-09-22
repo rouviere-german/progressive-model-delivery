@@ -67,6 +67,7 @@ __all__ = [
 FloatArray = npt.NDArray[np.float64]
 DerivativeFn = Callable[[FloatArray], FloatArray]
 _BISECTION_STEPS = 64
+_CF_STEPS = 400
 LOG_E_FLOOR = -700.0
 """Log e-values are clipped here: an e-value of exp(-700) is zero for every decision."""
 
@@ -118,6 +119,59 @@ def discordant_null(odds_ratio: float = 1.0) -> float:
     return odds_ratio / (1.0 + odds_ratio)
 
 
+def _beta_continued_fraction(a: FloatArray, b: FloatArray, x: FloatArray) -> FloatArray:
+    """Continued fraction of the incomplete beta function (modified Lentz, vectorized).
+
+    Converges quickly for ``x < (a + 1) / (a + b + 2)`` (Press et al., Numerical Recipes 6.4).
+    """
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = np.ones_like(x)
+    d = 1.0 - qab * x / qap
+    d = 1.0 / np.where(np.abs(d) < tiny, tiny, d)
+    h = d.copy()
+    for m in range(1, _CF_STEPS + 1):
+        m2 = 2.0 * m
+        for numerator in (
+            m * (b - m) * x / ((qam + m2) * (a + m2)),
+            -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2)),
+        ):
+            d = 1.0 + numerator * d
+            d = 1.0 / np.where(np.abs(d) < tiny, tiny, d)
+            c = 1.0 + numerator / c
+            c = np.where(np.abs(c) < tiny, tiny, c)
+            h = h * d * c
+    return h
+
+
+def _log_beta_tail(a: FloatArray, b: FloatArray, x: FloatArray, *, upper: bool) -> FloatArray:
+    """``log`` of the lower (or upper) regularized incomplete beta tail at ``x``.
+
+    SciPy's value is used where it is comfortably representable; tails below 1e-200 (where
+    subnormal floats lose precision) are recomputed in log space from the continued fraction,
+    which is exactly the region where it converges fastest.
+    """
+    direct = special.betaincc(a, b, x) if upper else special.betainc(a, b, x)
+    with np.errstate(divide="ignore"):
+        log_direct = np.log(direct)
+    small = direct < 1e-200
+    if not np.any(small):
+        return np.asarray(log_direct, dtype=np.float64)
+    # Upper tail of Beta(a, b) at x is the lower tail of Beta(b, a) at 1 - x.
+    aa, bb, xx = (b[small], a[small], 1.0 - x[small]) if upper else (a[small], b[small], x[small])
+    log_front = (
+        special.gammaln(aa + bb)
+        - special.gammaln(aa)
+        - special.gammaln(bb)
+        + aa * np.log(xx)
+        + bb * np.log1p(-xx)
+        - np.log(aa)
+    )
+    result = np.asarray(log_direct, dtype=np.float64).copy()
+    result[small] = log_front + np.log(_beta_continued_fraction(aa, bb, xx))
+    return result
+
+
 def beta_mixture_log_e(
     successes: npt.ArrayLike,
     failures: npt.ArrayLike,
@@ -143,21 +197,15 @@ def beta_mixture_log_e(
     k, j, p0 = np.broadcast_arrays(k, j, p0)
     a = strength * p0
     b = strength * (1.0 - p0)
-    if alt is Alternative.GREATER:
-        tail_posterior = special.betaincc(a + k, b + j, p0)
-        tail_prior = special.betaincc(a, b, p0)
-    else:
-        tail_posterior = special.betainc(a + k, b + j, p0)
-        tail_prior = special.betainc(a, b, p0)
-    with np.errstate(divide="ignore"):
-        value = (
-            special.betaln(a + k, b + j)
-            - special.betaln(a, b)
-            + np.log(tail_posterior)
-            - np.log(tail_prior)
-            - special.xlogy(k, p0)
-            - special.xlog1py(j, -p0)
-        )
+    upper = alt is Alternative.GREATER
+    value = (
+        special.betaln(a + k, b + j)
+        - special.betaln(a, b)
+        + _log_beta_tail(a + k, b + j, p0, upper=upper)
+        - _log_beta_tail(a, b, p0, upper=upper)
+        - special.xlogy(k, p0)
+        - special.xlog1py(j, -p0)
+    )
     result: FloatArray = np.maximum(np.nan_to_num(value, nan=LOG_E_FLOOR), LOG_E_FLOOR)
     return result
 

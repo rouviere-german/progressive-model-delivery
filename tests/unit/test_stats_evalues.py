@@ -208,3 +208,26 @@ def test_unconditional_handles_empty_arms_and_validates() -> None:
         two_sample_log_e(5, 3, 0, 1, margin=0.0, alternative="greater")
     with pytest.raises(ValueError, match="margin"):
         two_sample_log_e(1, 3, 0, 1, margin=1.0, alternative="greater")
+
+
+def test_log_space_tails_match_scipy_and_survive_underflow() -> None:
+    from scipy import special as sp
+
+    from progressive_model_delivery.stats.evalues import _log_beta_tail
+
+    a = np.array([20.0, 5.0, 300.0, 47.66, 2.0])
+    b = np.array([400.0, 900.0, 40.0, 1_284.34, 3.0])
+    x = np.array([0.5, 0.2, 0.5, 0.953, 0.4])
+    for upper in (True, False):
+        ours = _log_beta_tail(a, b, x, upper=upper)
+        with np.errstate(divide="ignore"):
+            reference = np.log(sp.betaincc(a, b, x) if upper else sp.betainc(a, b, x))
+        representable = np.isfinite(reference) & (reference > -600)
+        np.testing.assert_allclose(ours[representable], reference[representable], rtol=1e-9)
+        assert np.all(np.isfinite(ours))
+    # Far beyond double-precision underflow, and still monotone in the shape parameter.
+    deep = _log_beta_tail(
+        np.array([47.66, 47.66]), np.array([3_000.0, 3_001.0]), np.array([0.953, 0.953]), upper=True
+    )
+    assert deep[0] < -5_000
+    assert deep[1] < deep[0]
