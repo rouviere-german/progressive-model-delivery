@@ -13,6 +13,8 @@ import pytest
 import structlog
 from hypothesis import HealthCheck, settings
 
+from progressive_model_delivery.models.pipeline import DemoRegistry
+
 settings.register_profile("dev", max_examples=60, deadline=None)
 settings.register_profile(
     "ci",
@@ -59,3 +61,9 @@ def restore_logging() -> Iterator[None]:
 @pytest.fixture
 def repo_root() -> Path:
     return REPO_ROOT
+
+
+@pytest.fixture(scope="session")
+def trained_registry(tmp_path_factory: pytest.TempPathFactory) -> DemoRegistry:
+    """Demo models trained once per test session (a few seconds)."""
+    return DemoRegistry.create(tmp_path_factory.mktemp("registry"))

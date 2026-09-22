@@ -20,6 +20,7 @@ import numpy as np
 import numpy.typing as npt
 
 __all__ = [
+    "BinnedReference",
     "DriftMonitor",
     "DriftReport",
     "FeatureDrift",
@@ -79,6 +80,71 @@ def kolmogorov_survival(lam: float) -> float:
         if abs(term) < 1e-12:
             break
     return min(1.0, max(0.0, total))
+
+
+@dataclass(frozen=True, slots=True)
+class BinnedReference:
+    """A stored reference distribution: inner bin edges and the reference fraction per bin.
+
+    Release manifests carry one per feature (and one for the model score), so PSI on live traffic
+    needs no access to the training data. Numeric features use reference quantiles as edges;
+    categorical codes ``0..k-1`` use edges at ``0.5, 1.5, ...``.
+    """
+
+    inner_edges: tuple[float, ...]
+    fractions: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.fractions) != len(self.inner_edges) + 1:
+            raise ValueError("a reference needs exactly one more fraction than inner edges")
+        if list(self.inner_edges) != sorted(self.inner_edges):
+            raise ValueError("inner edges must be sorted")
+        if not math.isclose(sum(self.fractions), 1.0, abs_tol=1e-6):
+            raise ValueError("fractions must sum to 1")
+
+    @classmethod
+    def from_sample(cls, values: npt.ArrayLike, *, bins: int = 10) -> BinnedReference:
+        if bins < 2:
+            raise ValueError("bins must be >= 2")
+        sample = _as_sample(values, "reference")
+        edges = np.unique(np.quantile(sample, np.linspace(0.0, 1.0, bins + 1)))[1:-1]
+        counts = np.bincount(np.searchsorted(edges, sample, side="right"), minlength=edges.size + 1)
+        return cls(tuple(float(x) for x in edges), tuple(float(x) for x in counts / sample.size))
+
+    @classmethod
+    def from_codes(cls, codes: npt.ArrayLike, *, n_categories: int) -> BinnedReference:
+        if n_categories < 2:
+            raise ValueError("n_categories must be >= 2")
+        sample = _as_sample(codes, "reference").astype(np.int64)
+        if np.any((sample < 0) | (sample >= n_categories)):
+            raise ValueError("category codes out of range")
+        counts = np.bincount(sample, minlength=n_categories)
+        return cls(
+            tuple(k + 0.5 for k in range(n_categories - 1)),
+            tuple(float(x) for x in counts / sample.size),
+        )
+
+    def fractions_of(self, values: npt.ArrayLike) -> FloatArray:
+        sample = _as_sample(values, "current")
+        counts = np.bincount(
+            np.searchsorted(np.asarray(self.inner_edges), sample, side="right"),
+            minlength=len(self.fractions),
+        )
+        result: FloatArray = counts / sample.size
+        return result
+
+    def psi(self, values: npt.ArrayLike, *, eps: float = 1e-4) -> float:
+        """PSI of ``values`` against this reference (same formula as :func:`psi`)."""
+        current = np.clip(self.fractions_of(values), eps, None)
+        reference = np.clip(np.asarray(self.fractions, dtype=np.float64), eps, None)
+        return float(np.sum((current - reference) * np.log(current / reference)))
+
+    def to_json(self) -> dict[str, list[float]]:
+        return {"inner_edges": list(self.inner_edges), "fractions": list(self.fractions)}
+
+    @classmethod
+    def from_json(cls, data: dict[str, list[float]]) -> BinnedReference:
+        return cls(tuple(data["inner_edges"]), tuple(data["fractions"]))
 
 
 @dataclass(frozen=True, slots=True)
