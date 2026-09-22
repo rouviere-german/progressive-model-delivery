@@ -29,8 +29,11 @@ _PACKAGES = ("numpy", "pandas", "pandera", "pydantic", "lightgbm", "scikit-learn
 
 @dataclass(frozen=True, slots=True)
 class DemoModels:
+    """Published releases plus both quality views (see :class:`TrainedModel`)."""
+
     releases: Mapping[str, SignedRelease]
     metrics: Mapping[str, Mapping[str, float]]
+    live_metrics: Mapping[str, Mapping[str, float]]
     dataset_sha256: tuple[str, ...]
 
     def release_id(self, name: str) -> str:
@@ -94,6 +97,7 @@ def build_demo_models(
     created = clock_now or datetime.now(UTC)
     releases: dict[str, SignedRelease] = {}
     metrics: dict[str, dict[str, float]] = {}
+    live_metrics: dict[str, dict[str, float]] = {}
     dataset_sha: tuple[str, ...] = ()
     ordered = ("champion", *(name for name in names if name != "champion"))
     for name in ordered:
@@ -124,7 +128,10 @@ def build_demo_models(
             created_at=created,
         )
         metrics[name] = dict(trained.metrics)
-    return DemoModels(releases=releases, metrics=metrics, dataset_sha256=dataset_sha)
+        live_metrics[name] = dict(trained.live_metrics)
+    return DemoModels(
+        releases=releases, metrics=metrics, live_metrics=live_metrics, dataset_sha256=dataset_sha
+    )
 
 
 @dataclass(frozen=True, slots=True)

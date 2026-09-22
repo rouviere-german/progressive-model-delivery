@@ -150,18 +150,29 @@ def reference_distributions(
 
 @dataclass(frozen=True, slots=True)
 class TrainedModel:
+    """A trained model with two views of its quality.
+
+    ``metrics`` and ``references`` come from the training pipeline's own validation frame, which
+    went through the same (possibly buggy) preparation as the training frame; they are what the
+    signed manifest records. ``live_metrics`` score the clean holdout, which is what serving will
+    actually see. For a healthy model the two agree; for the pipeline-bug challengers they do
+    not, which is the point of progressive delivery.
+    """
+
     config: TrainingConfig
     model_text: str
     metrics: dict[str, float]
+    live_metrics: dict[str, float]
     references: dict[str, dict[str, list[float]]]
     feature_order: tuple[str, ...] = field(default=FEATURE_ORDER)
 
 
-def _prepare_training_frame(frame: pd.DataFrame, config: TrainingConfig) -> pd.DataFrame:
-    prepared = frame.iloc[: config.n_train].copy()
+def _prepare_frame(frame: pd.DataFrame, config: TrainingConfig, *, seed: int) -> pd.DataFrame:
+    """Apply the training pipeline's preparation (including its bugs) to a frame."""
+    prepared = frame.copy()
     if config.stale_labels_in_region is not None:
         mask = (prepared[SUBGROUP_FEATURE] == config.stale_labels_in_region).to_numpy()
-        rng = np.random.default_rng(config.seed)
+        rng = np.random.default_rng(seed)
         stale = label_probability(prepared.loc[mask], south_interaction=False)
         labels = prepared["label"].to_numpy().copy()
         labels[mask] = (rng.random(int(mask.sum())) < stale).astype(np.int64)
@@ -175,10 +186,11 @@ def _prepare_training_frame(frame: pd.DataFrame, config: TrainingConfig) -> pd.D
 def train_model(
     config: TrainingConfig, train_frame: pd.DataFrame, holdout: pd.DataFrame
 ) -> TrainedModel:
-    """Train one model, evaluate it on the (clean) holdout and export LightGBM text."""
+    """Train one model, evaluate it (pipeline view and live view) and export LightGBM text."""
     if len(train_frame) < config.n_train:
         raise ValueError(f"{config.name} needs {config.n_train} rows, got {len(train_frame)}")
-    prepared = _prepare_training_frame(train_frame, config)
+    prepared = _prepare_frame(train_frame.iloc[: config.n_train], config, seed=config.seed)
+    validation = _prepare_frame(holdout, config, seed=config.seed + 1)
     dataset = lgb.Dataset(
         to_matrix(prepared),
         label=prepared["label"].to_numpy(dtype=np.float64),
@@ -188,10 +200,12 @@ def train_model(
         params={"verbose": -1},
     )
     booster = lgb.train(config.params(), dataset, num_boost_round=config.num_boost_round)
-    scores = np.asarray(booster.predict(to_matrix(holdout)), dtype=np.float64)
+    pipeline_scores = np.asarray(booster.predict(to_matrix(validation)), dtype=np.float64)
+    live_scores = np.asarray(booster.predict(to_matrix(holdout)), dtype=np.float64)
     return TrainedModel(
         config=config,
         model_text=str(booster.model_to_string()),
-        metrics=evaluate_scores(holdout["label"], scores, holdout[SUBGROUP_FEATURE]),
-        references=reference_distributions(holdout, scores),
+        metrics=evaluate_scores(validation["label"], pipeline_scores, validation[SUBGROUP_FEATURE]),
+        live_metrics=evaluate_scores(holdout["label"], live_scores, holdout[SUBGROUP_FEATURE]),
+        references=reference_distributions(validation, pipeline_scores),
     )

@@ -77,7 +77,7 @@ def test_training_is_deterministic_and_text_only() -> None:
 
 
 def test_catalogue_scenarios_behave_as_designed(trained_registry: DemoRegistry) -> None:
-    metrics = trained_registry.models.metrics
+    metrics = trained_registry.models.live_metrics
     champion = metrics["champion"]
     assert metrics["better"]["error_rate"] < champion["error_rate"]
     assert metrics["better"]["log_loss"] < champion["log_loss"]
@@ -88,6 +88,10 @@ def test_catalogue_scenarios_behave_as_designed(trained_registry: DemoRegistry) 
     assert subgroup["error_rate"] <= champion["error_rate"] + 0.005
     assert subgroup["error_rate_south"] > champion["error_rate_south"] + 0.02
     assert metrics["feature_order_bug"]["auc"] < 0.7
+    # The pipeline bugs are invisible in the pipeline's own (signed) validation metrics.
+    pipeline = trained_registry.models.metrics
+    assert pipeline["feature_order_bug"]["auc"] > 0.85
+    assert pipeline["subgroup_worse"]["error_rate_south"] < subgroup["error_rate_south"]
 
 
 def test_scorer_validates_features() -> None:
