@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -11,7 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CollectorRegistry
-from pydantic import BaseModel, ConfigDict, Field
 
 from progressive_model_delivery import __version__
 from progressive_model_delivery.core.config import Settings, get_settings
@@ -24,27 +24,14 @@ from progressive_model_delivery.core.middleware import (
     RequestContextMiddleware,
 )
 from progressive_model_delivery.core.ratelimit import RateLimiter
-from progressive_model_delivery.core.redaction import redact_text
-from progressive_model_delivery.core.security import (
-    ApiKeyVerifier,
-    AuthenticatedPrincipal,
-    require_api_key,
-)
+from progressive_model_delivery.core.security import ApiKeyVerifier, require_api_key
 from progressive_model_delivery.core.tracing import build_tracer_provider
 
-__all__ = ["ReadinessCheck", "RedactRequest", "RedactResponse", "create_app"]
+__all__ = ["Lifespan", "ReadinessCheck", "create_app"]
 
 ReadinessCheck = Callable[[], bool | Awaitable[bool]]
+Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 _log = get_logger("progressive_model_delivery.app")
-
-
-class RedactRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    text: str = Field(min_length=1, max_length=10_000)
-
-
-class RedactResponse(BaseModel):
-    text: str
 
 
 async def _run_check(name: str, check: ReadinessCheck) -> bool:
@@ -64,13 +51,19 @@ def create_app(
     readiness_checks: Mapping[str, ReadinessCheck] | None = None,
     registry: CollectorRegistry | None = None,
     tracer_provider: TracerProvider | None = None,
+    lifespan: Lifespan | None = None,
+    extra_key_digests: Iterable[str] = (),
 ) -> FastAPI:
-    """Build the app. All state hangs off ``app.state``; nothing global is mutated."""
+    """Build the app. All state hangs off ``app.state``; nothing global is mutated.
+
+    Services add their own routes to the returned app; they run behind the same middleware.
+    ``extra_key_digests`` admits additional API keys (for example role-bound control-plane keys).
+    """
     cfg = settings if settings is not None else get_settings()
     checks: dict[str, ReadinessCheck] = dict(readiness_checks or {})
     provider = tracer_provider or build_tracer_provider(cfg.service_name, cfg.tracing_exporter)
     metrics = create_http_metrics(registry)
-    verifier = ApiKeyVerifier(cfg.api_key_sha256)
+    verifier = ApiKeyVerifier([*cfg.api_key_sha256, *extra_key_digests])
     limiter = RateLimiter(
         cfg.rate_limit_per_second, cfg.rate_limit_burst, max_keys=cfg.rate_limit_max_clients
     )
@@ -81,6 +74,7 @@ def create_app(
         docs_url="/docs" if cfg.enable_docs else None,
         redoc_url=None,
         openapi_url="/openapi.json" if cfg.enable_docs else None,
+        lifespan=lifespan,
     )
     app.state.settings = cfg
     app.state.metrics = metrics
@@ -111,12 +105,6 @@ def create_app(
     async def metrics_endpoint(request: Request) -> Response:
         payload, content_type = render_metrics(request.app.state.metrics.registry)
         return Response(content=payload, media_type=content_type)
-
-    @app.post("/v1/redact", response_model=RedactResponse)
-    async def redact(body: RedactRequest, principal: AuthenticatedPrincipal) -> RedactResponse:
-        """Example protected endpoint: return the input with PII and secrets redacted."""
-        _log.info("redact_called", key_id=principal.key_id, chars=len(body.text))
-        return RedactResponse(text=redact_text(body.text))
 
     # add_middleware prepends, so the last one added is the outermost.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=cfg.max_body_bytes, metrics=metrics)

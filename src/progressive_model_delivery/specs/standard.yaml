@@ -1,0 +1,49 @@
+# Production-style rollout policy for the churn-risk model. Versioned: bump `version` on change;
+# the controller stores the SHA-256 of the parsed spec with every rollout and audit entry.
+name: churn-risk-standard
+version: 1
+alpha_rollback: 0.025      # P(ever rolling back a challenger that is no worse) <= 0.025
+alpha_promotion: 0.025     # P(promoting a challenger that is inferior on a tested guardrail) <= 0.025
+label_window_seconds: 3600 # labels are accepted for 1 h; only matured requests enter the tests
+prior_strength: 50
+stages:
+  - kind: shadow
+    min_samples: 2000
+    min_duration_seconds: 3600
+    max_duration_seconds: 172800
+  - kind: canary
+    weight_percent: 1
+    min_samples: 100
+    min_duration_seconds: 1800
+  - kind: canary
+    weight_percent: 5
+    min_samples: 500
+    min_duration_seconds: 3600
+  - kind: canary
+    weight_percent: 25
+    min_samples: 2000
+    min_duration_seconds: 7200
+    require_non_inferiority: true
+  - kind: canary
+    weight_percent: 50
+    min_samples: 5000
+    min_duration_seconds: 14400
+    require_non_inferiority: true
+guardrails:
+  - name: error_rate
+    metric: error
+    non_inferiority_ratio: 1.10
+  - name: worst_subgroup_error
+    metric: error
+    subgroups: true
+  - name: latency_slo
+    metric: latency_slo
+    slo_ms: 25
+  - name: log_loss
+    metric: log_loss
+    non_inferiority_margin: 0.02
+    mixture_scale: 0.05
+drift:
+  feature_psi_threshold: 0.2
+  score_psi_threshold: 0.25
+  min_samples: 500

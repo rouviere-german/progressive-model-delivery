@@ -1,0 +1,48 @@
+# The same policy compressed for the offline demo (simulated clock, minutes instead of hours).
+name: churn-risk-demo
+version: 1
+alpha_rollback: 0.025
+alpha_promotion: 0.025
+label_window_seconds: 120
+prior_strength: 50
+stages:
+  - kind: shadow
+    min_samples: 600
+    min_duration_seconds: 300
+    max_duration_seconds: 7200
+  - kind: canary
+    weight_percent: 1
+    min_samples: 10
+    min_duration_seconds: 120
+  - kind: canary
+    weight_percent: 5
+    min_samples: 60
+    min_duration_seconds: 180
+  - kind: canary
+    weight_percent: 25
+    min_samples: 300
+    min_duration_seconds: 300
+    require_non_inferiority: true
+  - kind: canary
+    weight_percent: 50
+    min_samples: 600
+    min_duration_seconds: 300
+    require_non_inferiority: true
+guardrails:
+  - name: error_rate
+    metric: error
+    non_inferiority_ratio: 1.10
+  - name: worst_subgroup_error
+    metric: error
+    subgroups: true
+  - name: latency_slo
+    metric: latency_slo
+    slo_ms: 25
+  - name: log_loss
+    metric: log_loss
+    non_inferiority_margin: 0.02
+    mixture_scale: 0.05
+drift:
+  feature_psi_threshold: 0.2
+  score_psi_threshold: 0.25
+  min_samples: 300

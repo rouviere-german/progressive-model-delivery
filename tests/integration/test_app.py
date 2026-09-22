@@ -11,19 +11,38 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import BaseModel, ConfigDict, Field
 
-from progressive_model_delivery.core.app import create_app
+from progressive_model_delivery.core.app import create_app as create_base_app
 from progressive_model_delivery.core.config import Settings
 from progressive_model_delivery.core.healthcheck import main as healthcheck_main
 from progressive_model_delivery.core.healthcheck import probe
 from progressive_model_delivery.core.middleware import SECURITY_HEADERS
-from progressive_model_delivery.core.security import hash_api_key
+from progressive_model_delivery.core.redaction import redact_text
+from progressive_model_delivery.core.security import AuthenticatedPrincipal, hash_api_key
 from progressive_model_delivery.core.tracing import build_tracer_provider
 
 pytestmark = pytest.mark.integration
 
 API_KEY = "integration-test-key-" + "x" * 24
 AUTH = {"X-API-Key": API_KEY}
+
+
+class EchoRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=10_000)
+
+
+def create_app(settings: Settings, **kwargs: Any) -> FastAPI:
+    """The baseline app plus one protected route, standing in for a service's own routes."""
+    app = create_base_app(settings, **kwargs)
+
+    @app.post("/v1/echo")
+    async def echo(body: EchoRequest, principal: AuthenticatedPrincipal) -> dict[str, str]:
+        assert principal.key_id
+        return {"text": redact_text(body.text)}
+
+    return app
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -78,32 +97,32 @@ def test_readyz_reports_check_names_without_error_details() -> None:
 
 
 def test_protected_endpoint_requires_a_valid_api_key(client: TestClient) -> None:
-    missing = client.post("/v1/redact", json={"text": "hi"})
+    missing = client.post("/v1/echo", json={"text": "hi"})
     assert missing.status_code == 401
     assert missing.json()["error"]["code"] == "unauthorized"
     assert missing.headers["www-authenticate"] == "ApiKey"
 
-    wrong = client.post("/v1/redact", json={"text": "hi"}, headers={"X-API-Key": "nope"})
+    wrong = client.post("/v1/echo", json={"text": "hi"}, headers={"X-API-Key": "nope"})
     assert wrong.status_code == 401
 
-    ok = client.post("/v1/redact", json={"text": "mail jane@example.com"}, headers=AUTH)
+    ok = client.post("/v1/echo", json={"text": "mail jane@example.com"}, headers=AUTH)
     assert ok.status_code == 200
     assert ok.json() == {"text": "mail [REDACTED:EMAIL]"}
 
     bearer = client.post(
-        "/v1/redact", json={"text": "hi"}, headers={"Authorization": f"Bearer {API_KEY}"}
+        "/v1/echo", json={"text": "hi"}, headers={"Authorization": f"Bearer {API_KEY}"}
     )
     assert bearer.status_code == 200
 
 
 def test_validation_errors_never_echo_submitted_values(client: TestClient) -> None:
     secret = "hunter2-" + "s" * 10
-    extra = client.post("/v1/redact", json={"text": "ok", "password": secret}, headers=AUTH)
+    extra = client.post("/v1/echo", json={"text": "ok", "password": secret}, headers=AUTH)
     assert extra.status_code == 422
     assert extra.json()["error"]["code"] == "validation_error"
     assert secret not in extra.text
 
-    too_long = client.post("/v1/redact", json={"text": "z" * 10_001}, headers=AUTH)
+    too_long = client.post("/v1/echo", json={"text": "z" * 10_001}, headers=AUTH)
     assert too_long.status_code == 422
     assert "zzzzzzzz" not in too_long.text
 
@@ -116,7 +135,7 @@ def test_unknown_routes_and_methods_get_generic_errors(client: TestClient) -> No
         "message": "Not Found",
         "request_id": missing.headers["x-request-id"],
     }
-    wrong_method = client.get("/v1/redact")
+    wrong_method = client.get("/v1/echo")
     assert wrong_method.status_code == 405
     assert wrong_method.json()["error"]["code"] == "method_not_allowed"
 
@@ -143,7 +162,7 @@ def test_body_size_limit_applies_to_declared_and_streamed_bodies() -> None:
     app = create_app(make_settings(max_body_bytes=64))
     headers = {**AUTH, "Content-Type": "application/json"}
     with make_client(app) as test_client:
-        declared = test_client.post("/v1/redact", content=b"x" * 200, headers=headers)
+        declared = test_client.post("/v1/echo", content=b"x" * 200, headers=headers)
         assert declared.status_code == 413
         assert declared.json()["error"]["code"] == "payload_too_large"
 
@@ -151,7 +170,7 @@ def test_body_size_limit_applies_to_declared_and_streamed_bodies() -> None:
             for _ in range(10):
                 yield b"x" * 20
 
-        streamed = test_client.post("/v1/redact", content=chunks(), headers=headers)
+        streamed = test_client.post("/v1/echo", content=chunks(), headers=headers)
         assert streamed.status_code == 413
 
 
@@ -159,11 +178,11 @@ def test_rate_limit_rejects_bursts_and_exempts_probes() -> None:
     app = create_app(make_settings(rate_limit_burst=2, rate_limit_per_second=0.001))
     with make_client(app) as test_client:
         codes = [
-            test_client.post("/v1/redact", json={"text": "a"}, headers=AUTH).status_code
+            test_client.post("/v1/echo", json={"text": "a"}, headers=AUTH).status_code
             for _ in range(3)
         ]
         assert codes == [200, 200, 429]
-        limited = test_client.post("/v1/redact", json={"text": "a"}, headers=AUTH)
+        limited = test_client.post("/v1/echo", json={"text": "a"}, headers=AUTH)
         assert limited.headers["retry-after"].isdigit()
         assert limited.json()["error"]["code"] == "rate_limited"
         assert all(test_client.get("/healthz").status_code == 200 for _ in range(10))
@@ -174,7 +193,7 @@ def test_invalid_keys_cannot_mint_fresh_rate_limit_buckets() -> None:
     with make_client(app) as test_client:
         codes = [
             test_client.post(
-                "/v1/redact", json={"text": "a"}, headers={"X-API-Key": f"random-{i}"}
+                "/v1/echo", json={"text": "a"}, headers={"X-API-Key": f"random-{i}"}
             ).status_code
             for i in range(3)
         ]
@@ -189,14 +208,14 @@ def test_cors_allows_only_configured_origins() -> None:
     }
     with make_client(app) as test_client:
         allowed = test_client.options(
-            "/v1/redact", headers={"Origin": "https://app.example.com", **preflight}
+            "/v1/echo", headers={"Origin": "https://app.example.com", **preflight}
         )
         assert allowed.status_code == 200
         assert allowed.headers["access-control-allow-origin"] == "https://app.example.com"
         assert "access-control-allow-credentials" not in allowed.headers
 
         denied = test_client.options(
-            "/v1/redact", headers={"Origin": "https://evil.example", **preflight}
+            "/v1/echo", headers={"Origin": "https://evil.example", **preflight}
         )
         assert "access-control-allow-origin" not in denied.headers
         simple = test_client.get("/healthz", headers={"Origin": "https://evil.example"})
