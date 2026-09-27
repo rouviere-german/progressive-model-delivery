@@ -95,6 +95,8 @@ def evidence_payload(
         "evaluated_at": now,
         "spec_sha256": record.spec_sha256,
         "stage_index": record.stage_index,
+        "stage_kind": window.kind.value,
+        "canary_weight_percent": window.weight_bp / 100.0,
         "stage_elapsed_seconds": round(now - window.started_at, 3),
         "stage_samples": int(collected.stages[record.stage_index].samples),
         "decision": Decision(int(decision.decision)).name,
@@ -189,13 +191,22 @@ class Controller:
                     breached.append("score_psi")
                 reason = "guardrail breach: " + ", ".join(breached)
                 close(
-                    self.control, conn, record, actor=actor, status="rolled_back",
-                    reason=reason, evidence=payload,
+                    self.control,
+                    conn,
+                    record,
+                    actor=actor,
+                    status="rolled_back",
+                    reason=reason,
+                    evidence=payload,
                 )
                 outcome = ReconcileOutcome.ROLLED_BACK
             elif chosen is Decision.ABORT:
                 close(
-                    self.control, conn, record, actor=actor, status="aborted",
+                    self.control,
+                    conn,
+                    record,
+                    actor=actor,
+                    status="aborted",
                     reason="stage maximum duration exceeded without meeting its gate",
                     evidence=payload,
                 )

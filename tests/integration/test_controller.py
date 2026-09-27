@@ -27,14 +27,13 @@ from progressive_model_delivery.control.controller import (
 from progressive_model_delivery.control.evidence import EvidenceReader
 from progressive_model_delivery.control.spec import RolloutSpec, load_spec
 from progressive_model_delivery.control.store import ControlStore, RolloutRecord
-from progressive_model_delivery.models.pipeline import DemoRegistry
 from progressive_model_delivery.models.synthetic import LabelDelay
 from progressive_model_delivery.observability import RolloutMetrics
 from progressive_model_delivery.registry.release import ReleaseStore
 from progressive_model_delivery.serving.router import RouterRuntime, build_router_app
 from progressive_model_delivery.serving.shadow_worker import ShadowRuntime, build_shadow_app
 from progressive_model_delivery.sim.traffic import SimulatedClock, TrafficConfig, TrafficSimulator
-from tests.integration.conftest import API_KEY, SHADOW_TOKEN, ControlEnv
+from tests.integration.conftest import API_KEY, SHADOW_TOKEN, ControlEnv, number, sub
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -199,7 +198,7 @@ def harness(control_env: ControlEnv, fast_spec: RolloutSpec) -> Iterator[Harness
 
 def _propose(harness: Harness, challenger: str) -> RolloutRecord:
     """Open a rollout and let the router pick it up (its refresh loop is off in tests)."""
-    from progressive_model_delivery.control.operations import propose_rollout  # noqa: PLC0415
+    from progressive_model_delivery.control.operations import propose_rollout
 
     with harness.control.transaction() as conn:
         record = propose_rollout(
@@ -246,6 +245,9 @@ def test_a_pipeline_bug_challenger_is_rolled_back_with_evidence_in_the_audit_log
     assert evidence["spec_sha256"] == harness.spec.sha256()
     assert evidence["decision"] == "ROLLBACK"
     assert evidence["harm_breached"] is True
+    # The evidence records the exposure the decision was made under, not just the verdict.
+    assert evidence["stage_kind"] == "shadow"
+    assert evidence["canary_weight_percent"] == 0.0
     tests = evidence["tests"]
     assert isinstance(tests, list)
     crossed = [t["guardrail"] for t in tests if isinstance(t, dict) and t["crossed"]]
@@ -269,9 +271,12 @@ def test_a_better_challenger_walks_the_stages_and_asks_for_promotion(harness: Ha
     # The challenger really served traffic in the canary stages.
     served = sum(1 for window in final.stages if window.weight_bp)
     assert served == 2
+    last = harness.control.audit_entries(record.rollout_id)[-1]
+    assert number(last.data, "evidence", "canary_weight_percent") == 50.0
+    assert sub(last.data, "evidence")["stage_kind"] == "canary"
     report = harness.controller.last_report
     assert report is not None
-    assert report.evidence["challenger_exposure"] > 0
+    assert number(report.evidence, "challenger_exposure") > 0
 
 
 def test_an_identical_challenger_is_neither_rolled_back_nor_harmed(harness: Harness) -> None:
@@ -316,12 +321,11 @@ def test_replaying_a_rollout_on_a_copy_of_the_state_reproduces_every_decision(
         harness.run(20)
         original = harness.control.audit_entries(record.rollout_id)
         stamps = [
-            float(entry.data["evidence"]["evaluated_at"])  # type: ignore[index,arg-type]
+            number(entry.data, "evidence", "evaluated_at")
             for entry in original
             if "evidence" in entry.data
         ]
         predlog = harness.settings.predlog_dir
-        control_db = harness.settings.control_db
 
     replay_dir = tmp_path / "replay"
     shutil.copytree(predlog, replay_dir / "predlog")
@@ -329,7 +333,10 @@ def test_replaying_a_rollout_on_a_copy_of_the_state_reproduces_every_decision(
     replay_control = ControlStore(replay_dir / "control.sqlite", clock=clock)
     with replay_control.transaction() as conn:
         replay_control.set_champion(conn, control_env.release("champion"))
-        from progressive_model_delivery.registry.lifecycle import Production, Shadow  # noqa: PLC0415
+        from progressive_model_delivery.registry.lifecycle import (
+            Production,
+            Shadow,
+        )
 
         replay_control.set_lifecycle(conn, control_env.release("champion"), Production())
         replay_control.set_lifecycle(conn, control_env.release("feature_order_bug"), Shadow())
@@ -348,11 +355,11 @@ def test_replaying_a_rollout_on_a_copy_of_the_state_reproduces_every_decision(
         outcomes.append(replay.reconcile().outcome)
 
     replayed = replay_control.audit_entries(record.rollout_id)
-    assert [e.action for e in replayed] == [e.action for e in original if e.action != "rollout_proposed"]
+    assert [e.action for e in replayed] == [
+        e.action for e in original if e.action != "rollout_proposed"
+    ]
     assert outcomes[-1] is ReconcileOutcome.ROLLED_BACK
-    for first, again in zip(
-        (e for e in original if "evidence" in e.data), replayed, strict=False
-    ):
+    for first, again in zip((e for e in original if "evidence" in e.data), replayed, strict=False):
         assert again.data["evidence"] == first.data["evidence"]
     assert replay_control.rollout(record.rollout_id).status == "rolled_back"
 
@@ -369,17 +376,21 @@ def test_a_crash_before_the_commit_leaves_the_previous_state_intact(
     head = harness.control.verify_audit().head
     assert before.status == "active"
 
-    from progressive_model_delivery.control import controller as controller_module  # noqa: PLC0415
+    from progressive_model_delivery.control import controller as controller_module
 
     def exploding(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("controller crashed mid-transaction")
 
     monkeypatch.setattr(controller_module, "close", exploding)
     monkeypatch.setattr(controller_module, "advance", exploding)
-    with pytest.raises(RuntimeError, match="crashed"):
+
+    def until_decision() -> None:
         for _ in range(12):
             harness.traffic.tick()
             harness.controller.reconcile()
+
+    with pytest.raises(RuntimeError, match="crashed"):
+        until_decision()
     monkeypatch.undo()
 
     assert harness.control.rollout(record.rollout_id) == before
@@ -428,7 +439,9 @@ def test_only_the_lease_holder_reconciles(harness: Harness) -> None:
     harness.clock.advance(61.0)
     assert rival.reconcile().outcome is not ReconcileOutcome.NOT_LEADER
     held = harness.control.lease_holder(LEASE_NAME)
-    assert held is not None and held.holder == "c2" and held.token == 2
+    assert held is not None
+    assert held.holder == "c2"
+    assert held.token == 2
 
 
 def test_a_controller_that_lost_its_lease_cannot_write(harness: Harness) -> None:
@@ -438,18 +451,25 @@ def test_a_controller_that_lost_its_lease_cannot_write(harness: Harness) -> None
     assert lease is not None
     harness.clock.advance(61.0)
     stolen = harness.control.acquire_lease(LEASE_NAME, "c2", 600.0)
-    assert stolen is not None and stolen.token > lease.token
+    assert stolen is not None
+    assert stolen.token > lease.token
 
-    from progressive_model_delivery.control.store import LeaseLostError  # noqa: PLC0415
+    from progressive_model_delivery.control.store import Lease, LeaseLostError
 
-    def stale_lease(*args: object, **kwargs: object) -> object:
+    def stale_lease(name: str, holder: str, ttl_seconds: float) -> Lease | None:
+        """Hand the controller the lease it already lost, as a crashed peer would see it."""
+        del name, holder, ttl_seconds
         return lease
 
     harness.control.acquire_lease = stale_lease  # type: ignore[method-assign]
-    with pytest.raises(LeaseLostError):
+
+    def until_decision() -> None:
         for _ in range(12):
             harness.traffic.tick()
             harness.controller.reconcile()
+
+    with pytest.raises(LeaseLostError):
+        until_decision()
     assert harness.control.rollout(record.rollout_id).status == "active"
 
 
@@ -461,9 +481,7 @@ def test_a_concurrent_write_makes_the_pass_stale_instead_of_overwriting_it(
     original = ControlStore.rollout
     calls = {"n": 0}
 
-    def racing(
-        self: ControlStore, rollout_id: str, conn: object | None = None
-    ) -> RolloutRecord:
+    def racing(self: ControlStore, rollout_id: str, conn: object | None = None) -> RolloutRecord:
         stored = original(self, rollout_id, conn)  # type: ignore[arg-type]
         calls["n"] += 1
         return stored.model_copy(update={"revision": stored.revision + 1})
@@ -484,7 +502,7 @@ def test_the_controller_refuses_a_challenger_whose_signature_stopped_verifying(
     harness: Harness, tmp_path: Path
 ) -> None:
     """Tampering happens on a copy of the registry, so no other test sees a broken release."""
-    from progressive_model_delivery.registry.release import (  # noqa: PLC0415
+    from progressive_model_delivery.registry.release import (
         ReleaseVerificationError,
     )
 
@@ -509,10 +527,9 @@ def test_metrics_report_drift_statistics_from_the_live_traffic(harness: Harness)
     harness.run(4)
     report = harness.controller.last_report
     assert report is not None
-    drift = report.evidence["drift"]
-    assert isinstance(drift, dict)
-    assert drift["samples"] > 0
-    assert set(drift["feature_psi"]) >= {"monthly_spend", "usage_trend", "region"}  # type: ignore[arg-type]
+    drift = sub(report.evidence, "drift")
+    assert number(drift, "samples") > 0
+    assert set(sub(drift, "feature_psi")) >= {"monthly_spend", "usage_trend", "region"}
     assert drift["drift_ok"] is True
     assert harness.metric("app_feature_psi", "usage_trend") >= 0.0
 
@@ -541,7 +558,7 @@ def test_a_covariate_shift_stops_the_rollout_from_advancing(
         assert ReconcileOutcome.ADVANCED not in outcomes
         report = harness.controller.last_report
         assert report is not None
-        drift = report.evidence["drift"]
-        assert isinstance(drift, dict)
+        drift = sub(report.evidence, "drift")
         assert drift["drift_ok"] is False
-        assert float(drift["feature_psi"]["usage_trend"]) > fast_spec.drift.feature_psi_threshold  # type: ignore[index]
+        psi = number(drift, "feature_psi", "usage_trend")
+        assert psi > fast_spec.drift.feature_psi_threshold
