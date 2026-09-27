@@ -25,15 +25,38 @@ RUN uv sync --frozen --no-dev --no-editable
 FROM ${PYTHON_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="progressive-model-delivery" \
       org.opencontainers.image.licenses="MIT"
-RUN groupadd --system --gid 10001 app \
+# LightGBM and scikit-learn dlopen the OpenMP runtime when they are imported, and python:*-slim
+# does not ship it. Without libgomp1 every command that touches a model -- bootstrap, demo, and
+# the router the first time it loads a release -- dies on
+# `OSError: libgomp.so.1: cannot open shared object file`. Plain `serve` survives, because the
+# import is lazy, which is exactly why a healthz-only smoke test misses this.
+# libgomp1 is deliberately not version-pinned: the base image is digest-pinned but apt still
+# resolves against a live Debian mirror, so an exact pin breaks the build the day the package is
+# superseded.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin app
 COPY --from=builder /opt/venv /opt/venv
+# The Settings defaults are relative (`var/`, `var/control.sqlite`, ...), which is right for a
+# source checkout and wrong here: WORKDIR is /app, and every hardened deployment runs with a
+# read-only root filesystem, so the router died on `OSError: Read-only file system: 'var'` before
+# it ever bound a port. Point the state paths at one absolute directory -- the same
+# /var/lib/pmd docker-compose.yml mounts -- and own it as the app user, so the image needs only a
+# writable volume (or tmpfs) there and no environment at all to start.
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_HOST=0.0.0.0 \
-    APP_PORT=8000
+    APP_PORT=8000 \
+    APP_DATA_DIR=/var/lib/pmd \
+    APP_REGISTRY_DIR=/var/lib/pmd/registry \
+    APP_CONTROL_DB=/var/lib/pmd/control.sqlite \
+    APP_PREDLOG_DIR=/var/lib/pmd/predlog
+RUN install --directory --owner=10001 --group=10001 --mode=0750 /var/lib/pmd
 WORKDIR /app
 USER 10001:10001
 EXPOSE 8000

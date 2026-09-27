@@ -225,9 +225,20 @@ jobs:
           load: true
           push: false
           tags: ${{ env.IMAGE }}
+      # `serve` imports lightgbm lazily, so a healthz-only smoke test stays green on an image whose
+      # ML stack cannot import at all (a missing OpenMP runtime did exactly that). Assert the
+      # native extensions actually load before trusting the health probe.
+      - name: image imports its native dependencies
+        run: |
+          docker run --rm --entrypoint python "$IMAGE" -c 'import lightgbm, sklearn, scipy, pandas, pyarrow, duckdb, cryptography, progressive_model_delivery.registry.release; print("native import ok")'
+      # Mirrors the hardening compose applies: read-only root filesystem, no capabilities, and the
+      # state directory supplied as a writable mount. APP_SUBJECT_HASH_SECRET is not optional --
+      # the router refuses to serve predictions without it, so the container cannot start at all.
       - name: container smoke test (HEALTHCHECK reports healthy)
         run: |
-          docker run --detach --name app --read-only --tmpfs /tmp --cap-drop ALL \
+          docker run --detach --name app --read-only --tmpfs /tmp \
+            --tmpfs /var/lib/pmd:uid=10001,gid=10001 --cap-drop ALL \
+            --env APP_SUBJECT_HASH_SECRET=ci-smoke-subject-secret \
             --security-opt no-new-privileges --health-interval 3s "$IMAGE"
           for _ in $(seq 1 30); do
             status="$(docker inspect --format '{{.State.Health.Status}}' app)"
