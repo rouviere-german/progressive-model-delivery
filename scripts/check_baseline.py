@@ -4,9 +4,11 @@
 Usage: python scripts/check_baseline.py [--root PATH]
 
 The kind of repo comes from ``[tool.portfolio] kind`` in pyproject.toml: ``template`` (both kits),
-``agentic`` or ``ml``. Evidence references in CLAIMS.md and docs/THREAT_MODEL.md, written as
-backticked ``tests/...py::test_name``, ``bench/...py`` or ``.github/workflows/ci.yml#job``, must
-resolve to a real test function, file or CI job.
+``agentic`` or ``ml``. Evidence references in CLAIMS.md, docs/THREAT_MODEL.md and the package's own
+docstrings, written as backticked ``tests/...py::test_name``, ``bench/...py``, ``docs/...md`` or
+``.github/workflows/ci.yml#job``, must resolve to a real test function, file or CI job. A source
+docstring that points at a renamed test is the same broken claim as one in CLAIMS.md, and nothing
+else catches it.
 """
 
 from __future__ import annotations
@@ -105,6 +107,7 @@ DEV_TOOLS = ("pytest", "pytest-cov", "hypothesis", "ruff", "mypy", "bandit")
 # sentinels intact.
 TEMPLATE_PROJECT = "portfolio" + "-template"
 TEMPLATE_PACKAGE = "portfolio" + "_template"
+_DOCUMENT = re.compile(r"`+(docs/[A-Za-z0-9_./-]+\.md)`+")
 _EVIDENCE = re.compile(
     r"`((?:tests|bench|scripts)/[A-Za-z0-9_./-]+\.py)(?:::([A-Za-z_][A-Za-z0-9_]*))?`"
     r"|`(\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml)#([A-Za-z0-9_-]+)`"
@@ -318,30 +321,45 @@ def check_hygiene(root: Path, report: Report, package: str) -> None:
         )
 
 
-def check_evidence(root: Path, report: Report, document: str, *, minimum: int) -> None:
-    text = _read(root, document)
-    workflow = _read(root, ".github/workflows/ci.yml")
+def _resolve_references(root: Path, report: Report, where: str, text: str, workflow: str) -> int:
+    """Resolve every backticked evidence and document reference in ``text``; count the evidence."""
     references = list(_EVIDENCE.finditer(text))
-    report.require(
-        len(references) >= minimum, f"{document}: expected at least {minimum} evidence references"
-    )
     for match in references:
         file_ref, test_name, workflow_ref, job = match.groups()
         if file_ref:
             path = root / file_ref
-            report.require(path.is_file(), f"{document}: evidence file {file_ref} does not exist")
+            report.require(path.is_file(), f"{where}: evidence file {file_ref} does not exist")
             if test_name and path.is_file():
                 source = path.read_text(encoding="utf-8")
                 report.require(
                     re.search(rf"^\s*(?:async\s+)?def {test_name}\(", source, re.M),
-                    f"{document}: {file_ref}::{test_name} does not exist",
+                    f"{where}: {file_ref}::{test_name} does not exist",
                 )
         else:
             report.require(
                 (root / workflow_ref).is_file()
                 and re.search(rf"^  {re.escape(job)}:", workflow, re.M),
-                f"{document}: CI job {workflow_ref}#{job} does not exist",
+                f"{where}: CI job {workflow_ref}#{job} does not exist",
             )
+    for match in _DOCUMENT.finditer(text):
+        document = match.group(1)
+        report.require((root / document).is_file(), f"{where}: document {document} does not exist")
+    return len(references)
+
+
+def check_evidence(root: Path, report: Report, document: str, *, minimum: int) -> None:
+    workflow = _read(root, ".github/workflows/ci.yml")
+    found = _resolve_references(root, report, document, _read(root, document), workflow)
+    report.require(found >= minimum, f"{document}: expected at least {minimum} evidence references")
+
+
+def check_source_references(root: Path, report: Report, package: str) -> None:
+    """Docstrings in the package are claims too, so their references must resolve as well."""
+    workflow = _read(root, ".github/workflows/ci.yml")
+    for path in sorted((root / "src" / package).rglob("*.py")):
+        text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        where = path.relative_to(root).as_posix()
+        _resolve_references(root, report, where, text, workflow)
 
 
 def check_threat_model(root: Path, report: Report) -> None:
@@ -368,6 +386,7 @@ def run_checks(root: Path) -> Report:
     check_threat_model(root, report)
     check_evidence(root, report, "CLAIMS.md", minimum=1)
     check_evidence(root, report, "docs/THREAT_MODEL.md", minimum=1)
+    check_source_references(root, report, package)
     return report
 
 

@@ -1,8 +1,9 @@
 """The request feature schema shared by the generator, the contracts, training and serving.
 
 One definition feeds the pandera contract for training and logged frames, the pydantic contract
-for single requests, the synthetic generator and the model feature order, so the four cannot
-drift apart.
+for single requests, the synthetic generator and the model feature order. Three of the four import
+these specs; the pydantic contract cannot (pydantic needs literal annotations), so it hand-copies
+the bounds and ``tests/unit/test_serving_units.py`` holds the copy to them.
 """
 
 from __future__ import annotations
