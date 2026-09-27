@@ -1,0 +1,13 @@
+# Text files are stored and checked out with LF, whatever core.autocrlf says locally. The
+# Dockerfile copies this tree into a Linux image, CI runs on Linux, and scripts/compose_e2e.sh is
+# executed by bash there -- a CRLF checkout on Windows would change what ships and would break
+# that script outright.
+* text=auto eol=lf
+
+*.parquet binary
+*.npz binary
+*.png binary
+*.jpg binary
+
+# The compose end-to-end script must be executable in CI.
+scripts/compose_e2e.sh text eol=lf
