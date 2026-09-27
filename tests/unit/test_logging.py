@@ -97,3 +97,22 @@ def test_sets_bytes_objects_and_mapping_keys_are_redacted_before_rendering() -> 
     (record,) = _records(stream)
     assert record["recipients"] == ["[REDACTED:EMAIL]"]
     assert record["per_user"] == {"[REDACTED:EMAIL]": 3}
+
+
+def test_a_logger_created_before_configure_logging_obeys_the_configuration() -> None:
+    """Every module binds its logger at import time, which is before configure_logging runs.
+
+    A logger that froze the configuration at import would ignore APP_LOG_LEVEL, APP_LOG_JSON, the
+    stream -- and the redacting processor, so a field that should never be logged would be printed
+    in the clear by exactly the loggers the services use.
+    """
+    early = get_logger("early.module", component="router")
+    stream = io.StringIO()
+    configure_logging("WARNING", stream=stream)
+    early.info("hidden", email="jane@example.com")
+    early.warning("shown", email="jane@example.com")
+    records = _records(stream)
+    assert [record["event"] for record in records] == ["shown"]
+    assert records[0]["email"] == "[REDACTED:EMAIL]"
+    assert records[0]["component"] == "router"
+    assert "jane@example.com" not in stream.getvalue()

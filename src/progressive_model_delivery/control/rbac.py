@@ -194,7 +194,14 @@ class ControlService:
         except OperationError as exc:
             raise _conflict(str(exc)) from None
 
-    def propose(self, principal: Principal, challenger: str, spec: RolloutSpec) -> RolloutRecord:
+    def propose(
+        self,
+        principal: Principal,
+        challenger: str,
+        spec: RolloutSpec,
+        *,
+        salt: str | None = None,
+    ) -> RolloutRecord:
         self.require(principal, Role.DEPLOYER)
         refusal = self.limits.refusal(spec)
         if refusal is not None:
@@ -203,7 +210,12 @@ class ControlService:
         try:
             with self.control.transaction() as conn:
                 return propose_rollout(
-                    self.control, conn, challenger=challenger, spec=spec, actor=principal.name
+                    self.control,
+                    conn,
+                    challenger=challenger,
+                    spec=spec,
+                    actor=principal.name,
+                    salt=salt,
                 )
         except OperationError as exc:
             raise _conflict(str(exc)) from None

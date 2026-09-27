@@ -150,3 +150,21 @@ def test_the_demo_fails_loudly_when_a_scenario_does_not_behave(tmp_path: Path) -
         demo_module._expect(ReconcileOutcome.HOLD, ReconcileOutcome.ROLLED_BACK, "scenario")
     with pytest.raises(AppError):  # a viewer cannot propose
         env.service.propose(Principal("vic", frozenset()), env.release("better"), env.spec)
+
+
+def test_the_seed_pins_the_assignment_salts(demo_run: dict[str, object]) -> None:
+    """``demo --seed`` derives the salts, which is what makes a pasted run reproducible.
+
+    The shared ``demo_run`` fixture runs without a seed, as a deployment does, so this asserts the
+    summary records that and that the derivation itself is deterministic and per challenger. The
+    README block is pasted from a seeded run and names the command.
+    """
+    assert demo_run["seed"] is None
+    assert demo_module.salt_for(None, "better") is None
+    first = demo_module.salt_for(7, "better")
+    assert first == demo_module.salt_for(7, "better")
+    assert first is not None
+    assert len(first) == 32
+    assert int(first, 16) >= 0
+    assert first != demo_module.salt_for(7, "subgroup_worse")
+    assert first != demo_module.salt_for(8, "better")

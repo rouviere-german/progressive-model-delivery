@@ -70,8 +70,14 @@ def propose_rollout(
     challenger: str,
     spec: RolloutSpec,
     actor: str,
+    salt: str | None = None,
 ) -> RolloutRecord:
-    """Open a rollout for a (verified) challenger; it starts in the shadow stage."""
+    """Open a rollout for a (verified) challenger; it starts in the shadow stage.
+
+    The assignment salt is drawn fresh per rollout so the same customers are not always the test
+    group. ``salt`` overrides it, which only the demo does (``demo --seed``), to make a run's canary
+    numbers reproducible; a deployment must leave it unset.
+    """
     champion = store.champion(conn)
     if champion is None:
         raise OperationError("no champion is installed")
@@ -94,7 +100,7 @@ def propose_rollout(
         stages=(StageWindow(index=0, kind=StageKind.SHADOW, weight_bp=0, started_at=now),),
         proposed_by=actor,
         created_at=now,
-        salt=secrets.token_hex(16),
+        salt=salt if salt is not None else secrets.token_hex(16),
         revision=0,
     )
     try:

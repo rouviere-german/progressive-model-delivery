@@ -62,6 +62,18 @@ def configure_logging(
 
 
 def get_logger(name: str | None = None, **initial_values: Any) -> FilteringBoundLogger:
-    """Return a bound structlog logger."""
-    logger = structlog.get_logger(name) if name else structlog.get_logger()
-    return cast(FilteringBoundLogger, logger.bind(**initial_values))
+    """Return a structlog logger that resolves the configuration when it logs.
+
+    Deliberately *not* bound here. Every module creates its logger at import time, which happens
+    before :func:`configure_logging` runs, and ``bind()`` freezes whatever configuration exists at
+    that moment -- structlog's default: console renderer, stdout, INFO, and no redaction. Such a
+    logger ignores ``APP_LOG_LEVEL`` and ``APP_LOG_JSON`` and prints fields in the clear that the
+    redacting processor exists to remove. The lazy proxy keeps its initial values and picks up the
+    configuration on the first call instead (``tests/unit/test_logging.py``).
+    """
+    logger = (
+        structlog.get_logger(name, **initial_values)
+        if name
+        else structlog.get_logger(**initial_values)
+    )
+    return cast(FilteringBoundLogger, logger)

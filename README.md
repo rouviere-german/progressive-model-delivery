@@ -163,7 +163,8 @@ uv run python tasks.py bench     # the four benchmarks with regression threshold
 
 `demo` trains three models on synthetic data, signs and publishes them, and runs two complete
 rollouts against a real router, a real shadow worker and the real controller -- nothing mocked, no
-network, no API key. It prints a machine-readable record of what happened:
+network, no API key. It prints a machine-readable record of what happened; this is the record of
+`uv run python -m progressive_model_delivery demo --seed 7`, condensed:
 
 ```
 rollback_scenario:  challenger=subgroup_worse  outcome=rolled_back  stage_reached=0 (shadow)
@@ -172,8 +173,8 @@ rollback_scenario:  challenger=subgroup_worse  outcome=rolled_back  stage_reache
                     challenger_served_requests=0
                     requests=4750  labels_accepted=4233  labels_refused_after_window=134
 promotion_scenario: challenger=better  outcome=promotion_requested -> status=promoted
-                    canary_weights=[1.0, 5.0, 25.0, 50.0]  challenger_served_requests=1071
-                    non_inferiority_crossed=[error_rate: 7.26 > 3.69, log_loss: 6.71 > 3.69]
+                    canary_weights=[1.0, 5.0, 25.0, 50.0]  challenger_served_requests=1181
+                    non_inferiority_crossed=[error_rate: 4.80 > 3.69, log_loss: 15.23 > 3.69]
                     refused_approvals=["forbidden: the proposer cannot approve their own rollout"]
                     approved_by=ravi
 audit:              entries=10  verified=true  simulated_hours=1.73
@@ -183,11 +184,15 @@ The subgroup-regressed challenger is caught during shadow, so it never serves a 
 better one walks every stage, proves non-inferiority on served traffic, and then stops and waits:
 the controller asks for promotion, the proposer is refused, and a release manager grants it.
 
-Outcomes are deterministic and the test suite asserts them. The **canary** numbers -- served
-requests and the exact e-values at promotion -- move by a few percent between runs, because each
-rollout draws a fresh random assignment salt on purpose, so the same customers are not always the
-test group. The rollback scenario is bit-identical run to run: it finishes during the shadow stage,
-where both models score every request and there is no partition to draw.
+`--seed` derives the per-rollout assignment salts, which is the only reason that block is
+reproducible: two seeded runs agree on every number above (only the rollout ids and the freshly
+generated signing key differ). `tasks.py demo` and a deployment draw a random salt per rollout on
+purpose, so the same customers are not always the test group -- then the *outcomes* are still
+deterministic and the tests assert them, while the canary magnitudes move with the partition. Across
+unseeded runs on this box the challenger served 1,181-1,263 requests, the `error_rate` e-value at
+promotion ranged log_e 4.80-6.15 and `log_loss` 13.66-15.23. The rollback scenario is identical in
+every run, seeded or not: it finishes during the shadow stage, where both models score every request
+and there is no partition to draw.
 
 To run the real topology (router and shadow worker in separate containers, the worker with no
 egress):
@@ -383,6 +388,20 @@ Cut deliberately, and named here rather than implied:
   a fixed policy. It is not an experimentation platform and reports no lift estimates.
 - **No delayed-label imputation.** A label that misses its window is a lost label, counted and
   ignored, not modelled.
+- **Independence holds within a stage, not across the rollout.** Evidence counts each subject once
+  per stage, which is what the canary null needs, but a customer who comes back in a later stage
+  contributes one observation there too, so the per-stage e-values that multiply are not perfectly
+  independent. A rollout-wide subject split would fix that and would discard most of the evidence;
+  `docs/ROLLOUT_POLICY.md` says how visible the overlap is.
+- **Sub-millisecond shadow forwarding is not measurable in one process.** The production-readiness
+  goal was "bench/ enforces shadow forwarding adds < 1 ms to champion p99". What CI enforces is the
+  request path's own cost (the enqueue, p99 gated at 50 us) plus the `shadow_stub` mode, which adds
+  p50 ~1.8 ms here -- and a single in-process `httpx` round trip to a do-nothing ASGI app is p50
+  1.2-1.5 ms of that, measured in the same table. A separate container is not an in-process ASGI
+  transport, so the sub-millisecond figure would need two processes and a concurrent client.
+- **No keyed audit chain.** The hash chain detects edits by anyone who cannot recompute it; write
+  access to `control.sqlite` is enough to forge a consistent replacement. The head exported off-box
+  is the defence. Signing entries with the release key would close it and is not done.
 - **Time-to-promotion is not optimised.** The stage schedule is a policy input, not something the
   controller searches over. No always-valid optimal stopping, no bandit allocation.
 - **`shadow_in_process` p99 is not a production number.** See the serving bench above.

@@ -22,6 +22,7 @@ e-values at the decision, exposure, audit head and verification).
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import time
 from collections.abc import Callable, Iterator
@@ -285,13 +286,31 @@ def _traffic(
     )
 
 
+def salt_for(seed: int | None, challenger: str) -> str | None:
+    """The assignment salt for one scenario, or ``None`` to draw a fresh random one.
+
+    A rollout normally draws its own salt, which is why the canary numbers move between runs: a
+    different partition of customers serves a different number of requests and produces different
+    e-values at promotion. ``demo --seed`` derives the salt instead, so the whole run -- including
+    the pasted README block -- is reproducible.
+    """
+    if seed is None:
+        return None
+    return hashlib.sha256(f"{seed}:{challenger}".encode()).hexdigest()[:32]
+
+
 def _lifecycle_stage(env: DemoEnvironment, name: str) -> str:
     state = env.control.lifecycle(env.release(name))
     return "unknown" if state is None else str(state.stage)
 
 
-def _rollback_scenario(env: DemoEnvironment) -> dict[str, Any]:
-    record = env.service.propose(DEPLOYER, env.release("subgroup_worse"), env.spec)
+def _rollback_scenario(env: DemoEnvironment, seed: int | None = None) -> dict[str, Any]:
+    record = env.service.propose(
+        DEPLOYER,
+        env.release("subgroup_worse"),
+        env.spec,
+        salt=salt_for(seed, "subgroup_worse"),
+    )
     with _serving(env) as (client, flush, refresh):
         traffic = _traffic(env, client, flush, seed=101)
         traffic.assert_ttl_fits(env.settings.label_ttl_seconds)
@@ -317,8 +336,10 @@ def _rollback_scenario(env: DemoEnvironment) -> dict[str, Any]:
     }
 
 
-def _promotion_scenario(env: DemoEnvironment) -> dict[str, Any]:
-    record = env.service.propose(DEPLOYER, env.release("better"), env.spec)
+def _promotion_scenario(env: DemoEnvironment, seed: int | None = None) -> dict[str, Any]:
+    record = env.service.propose(
+        DEPLOYER, env.release("better"), env.spec, salt=salt_for(seed, "better")
+    )
     with _serving(env) as (client, flush, refresh):
         traffic = _traffic(env, client, flush, seed=202)
         traffic.assert_ttl_fits(env.settings.label_ttl_seconds)
@@ -355,13 +376,18 @@ def _promotion_scenario(env: DemoEnvironment) -> dict[str, Any]:
     }
 
 
-def run_demo(workdir: Path) -> dict[str, Any]:
-    """Run both rollouts under ``workdir`` and return a JSON-serializable summary."""
+def run_demo(workdir: Path, *, seed: int | None = None) -> dict[str, Any]:
+    """Run both rollouts under ``workdir`` and return a JSON-serializable summary.
+
+    Without ``seed`` each rollout draws a random assignment salt, as a deployment does: the
+    outcomes are deterministic (and the tests assert them) while the canary magnitudes move. With
+    ``seed`` the salts are derived from it and the whole summary is reproducible.
+    """
     env = build_environment(workdir)
     env.service.bootstrap(RELEASE_MANAGER, env.release("champion"))
     champion = env.release("champion")
-    rollback = _rollback_scenario(env)
-    promotion = _promotion_scenario(env)
+    rollback = _rollback_scenario(env, seed)
+    promotion = _promotion_scenario(env, seed)
     audit_path = env.workdir / "audit.jsonl"
     entries = env.control.export_audit(audit_path)
     verification = env.control.verify_audit()
@@ -372,6 +398,7 @@ def run_demo(workdir: Path) -> dict[str, Any]:
         "champion_changed": env.control.champion() != champion,
         "rollback_scenario": rollback,
         "promotion_scenario": promotion,
+        "seed": seed,
         "audit": {
             "entries": entries,
             "head": verification.head,

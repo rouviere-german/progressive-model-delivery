@@ -258,3 +258,22 @@ def test_advancing_a_release_that_left_the_canary_path_is_refused(
         store.set_lifecycle(conn, CHALLENGER, Staged())
     with pytest.raises(IllegalTransitionError, match="cannot advance"):
         _advance(store, record)
+
+
+def test_a_rollout_draws_a_fresh_salt_unless_one_is_given(
+    store: ControlStore, spec: RolloutSpec
+) -> None:
+    """The salt is random per rollout; only the demo pins it, to make a run reproducible."""
+    first = _propose(store, spec)
+    with store.transaction() as conn:
+        close(store, conn, first, actor="dana", status="aborted", reason="test", evidence={})
+    second = _propose(store, spec, challenger="c" * 64)
+    assert first.salt != second.salt
+    with store.transaction() as conn:
+        close(store, conn, second, actor="dana", status="aborted", reason="test", evidence={})
+    pinned = "9" * 32
+    with store.transaction() as conn:
+        third = propose_rollout(
+            store, conn, challenger="d" * 64, spec=spec, actor="dana", salt=pinned
+        )
+    assert third.salt == pinned

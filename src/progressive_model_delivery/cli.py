@@ -4,7 +4,8 @@ Subcommands:
 
 ``serve``              run the router (``--role router``) or the controller and control API
                       (``--role controller``) or the shadow worker (``--role shadow``).
-``demo``              the offline end-to-end demo (two rollouts, no network, no API key).
+``demo``              the offline end-to-end demo (two rollouts, no network, no API key);
+                      ``--seed`` fixes the assignment salts so the run is reproducible.
 ``generate-api-key``  print a new API key and its SHA-256 digest.
 ``role-binding``      print an ``APP_ROLE_BINDINGS`` entry for a principal and its roles.
 ``audit``             verify or export the hash-chained audit log of a control database.
@@ -68,14 +69,14 @@ def _serve(role: str, host: str | None, port: int | None) -> int:
     return 0
 
 
-def _demo(workdir: Path) -> int:
+def _demo(workdir: Path, seed: int | None) -> int:
     import sys as _sys  # noqa: PLC0415
 
     from progressive_model_delivery.core.logging import configure_logging  # noqa: PLC0415
     from progressive_model_delivery.demo import run_demo  # noqa: PLC0415
 
     configure_logging("WARNING", json_output=True, stream=_sys.stderr)
-    print(json.dumps(run_demo(workdir), indent=2, sort_keys=True))
+    print(json.dumps(run_demo(workdir, seed=seed), indent=2, sort_keys=True))
     return 0
 
 
@@ -167,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
 
     demo = sub.add_parser("demo", help="run the offline end-to-end demo")
     demo.add_argument("--workdir", type=Path, default=Path("var/demo"))
+    demo.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="derive the assignment salts from this seed so the run is reproducible",
+    )
 
     audit = sub.add_parser("audit", help="verify or export the audit chain")
     audit.add_argument("action", choices=["verify", "export"])
@@ -200,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         return _audit(args.action, args.database, args.output)
     if args.command == "bootstrap":
         return _bootstrap(args.root, args.key_out)
-    return _demo(args.workdir)
+    return _demo(args.workdir, args.seed)
 
 
 if __name__ == "__main__":
