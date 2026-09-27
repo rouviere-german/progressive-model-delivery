@@ -10,6 +10,11 @@ claimed.
 * ``forwarder_offer`` - the work the *request path* actually does for the shadow stage: build the
   job and ``put_nowait`` it onto the bounded queue, which FastAPI runs as a background task after
   the response is produced. Both the queue-has-room and the queue-is-full paths are timed.
+* ``shadow_stub`` - the real ``ShadowForwarder`` and the real HTTP sender against a stub worker that
+  answers 202 and does nothing else: no token check, no signature verification, no scoring, no
+  Parquet write. What is left is the forwarding cost proper -- the job, the queue, the request and
+  the response on the router's loop -- which is the number the production-readiness item is about
+  ("shadow forwarding adds < 1 ms to champion p99"), and it is gated there.
 * ``shadow_hanging`` - a shadow worker that never answers. Every job times out, the queue overflows
   and drops, and the champion's own p50/p95/p99 and error count must not move. This is the
   isolation claim from the threat model.
@@ -19,11 +24,14 @@ claimed.
 * ``shadow_in_process`` - the same traffic with a real shadow worker mounted on the *router's own*
   event loop through an ASGI transport, so its signature verification, LightGBM scoring and Parquet
   writing compete with the request being measured. A single-process benchmark cannot separate the
-  forwarder's cost from the worker's compute: the deployed topology gives the worker its own
-  container, its own event loop and its own CPU share (see ``docker-compose.yml``), and measuring
-  that end to end needs two servers and a concurrent client, which this benchmark is not. The
-  column is printed so the difference is visible rather than hidden, and it is *not* the cost of
-  shadow forwarding in production.
+  forwarder's cost from the worker's compute that way: the deployed topology gives the worker its
+  own container, its own event loop and its own CPU share (see ``docker-compose.yml``), and
+  measuring that end to end needs two servers and a concurrent client, which this benchmark is not.
+  The column is printed so the difference is visible rather than hidden, and it is *not* the cost of
+  shadow forwarding in production. ``shadow_stub`` is the part of it that can be isolated honestly.
+* ``concurrency`` - the same champion-only traffic from N clients at once. Scoring runs in a worker
+  thread (``asyncio.to_thread``), so concurrent requests do not queue behind one LightGBM call on
+  the event loop; the row exists so that change is visible rather than asserted.
 
 Absolute latencies include the in-process test client, so only differences between modes mean
 anything.
@@ -47,6 +55,7 @@ from typing import Any
 
 import httpx
 import numpy as np
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 from starlette.types import Receive, Scope, Send
@@ -76,7 +85,9 @@ from bench.harness import (  # noqa: E402 - the repo root has to be importable f
 API_KEY = "bench-api-key-" + "b" * 24
 SUBJECT_SECRET = "bench-subject-secret-" + "s" * 16
 SHADOW_TOKEN = "bench-shadow-token-" + "t" * 16
-MODES = ("champion_only", "shadow_in_process", "shadow_hanging")
+STUB_URL = "http://shadow.internal:8001/internal/shadow"
+MODES = ("champion_only", "shadow_stub", "shadow_in_process", "shadow_hanging")
+CONCURRENCY = (1, 8)
 FEATURES: dict[str, Any] = {
     "tenure_months": 14,
     "monthly_spend": 72.5,
@@ -90,6 +101,16 @@ FEATURES: dict[str, Any] = {
 
 async def _hanging_app(scope: Scope, receive: Receive, send: Send) -> None:
     await asyncio.sleep(3_600)
+
+
+async def _stub_app(scope: Scope, receive: Receive, send: Send) -> None:
+    """A shadow worker that only answers: no auth, no verification, no scoring, no log write."""
+    del scope
+    more_body = True
+    while more_body:
+        more_body = bool((await receive()).get("more_body", False))
+    await send({"type": "http.response.start", "status": 202, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
 
 
 def _settings(workdir: Path, registry: DemoRegistry, **overrides: Any) -> Settings:
@@ -140,6 +161,8 @@ def _router(
         if mode == "shadow_in_process":
             shadow_app = build_shadow_app(_settings(workdir, registry, **extra), background=False)
             transport = httpx.ASGITransport(app=shadow_app)
+        elif mode == "shadow_stub":
+            transport = httpx.ASGITransport(app=_stub_app)
         else:
             transport = httpx.ASGITransport(app=_hanging_app)
     app = build_router_app(
@@ -199,13 +222,8 @@ def _shadow_counters(client: TestClient) -> dict[str, float]:
     return counters
 
 
-def bench_offer() -> dict[str, dict[str, float]]:
-    """The request path's own cost: offer a built job to the bounded queue."""
-
-    async def send(job: dict[str, Any]) -> None:  # pragma: no cover - never awaited here
-        del job
-
-    job: dict[str, Any] = {
+def _job() -> dict[str, Any]:
+    return {
         "request_id": "a" * 32,
         "rollout_id": "b" * 32,
         "stage_index": 0,
@@ -214,6 +232,48 @@ def bench_offer() -> dict[str, dict[str, float]]:
         "ts": 1.0,
         "features": dict(FEATURES),
     }
+
+
+def bench_round_trip(runs: int = 2_000) -> dict[str, dict[str, float]]:
+    """One in-process POST to the stub worker: the floor under ``shadow_stub``'s added latency.
+
+    The forwarder's delivery tasks run on the router's own event loop, and in this benchmark the hop
+    is an ``httpx`` request through an ASGI transport in the same process. That plumbing costs about
+    a millisecond per job here, which is most of ``shadow_stub``'s added figure and is *not* what a
+    socket to another container costs. Measuring it is the only way to say which part of the added
+    latency belongs to this benchmark's shape rather than to the forwarder.
+    """
+
+    async def measure() -> list[float]:
+        samples: list[float] = []
+        job = _job()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_stub_app)) as client:
+            for _ in range(200):
+                await client.post(STUB_URL, json=job)
+            for _ in range(runs):
+                started = time.perf_counter_ns()
+                await client.post(STUB_URL, json=job)
+                samples.append(float(time.perf_counter_ns() - started))
+        return samples
+
+    micros = np.asarray(asyncio.run(measure()), dtype=np.float64) / 1_000.0
+    return {
+        "stub_shadow_round_trip": {
+            "runs": float(micros.size),
+            "p50_us": round(float(np.percentile(micros, 50)), 1),
+            "p95_us": round(float(np.percentile(micros, 95)), 1),
+            "p99_us": round(float(np.percentile(micros, 99)), 1),
+        }
+    }
+
+
+def bench_offer() -> dict[str, dict[str, float]]:
+    """The request path's own cost: offer a built job to the bounded queue."""
+
+    async def send(job: dict[str, Any]) -> None:  # pragma: no cover - never awaited here
+        del job
+
+    job = _job()
 
     async def build() -> tuple[ShadowForwarder, ShadowForwarder]:
         roomy = ShadowForwarder(
@@ -232,6 +292,59 @@ def bench_offer() -> dict[str, dict[str, float]]:
     }
 
 
+async def _concurrent(app: FastAPI, requests: int, clients: int) -> dict[str, float]:
+    """Per-request latency and throughput with ``clients`` requests in flight at once."""
+    headers = {"X-API-Key": API_KEY}
+    per_client = max(requests // clients, 1)
+    samples: list[float] = []
+    failures = 0
+
+    async def worker(client: httpx.AsyncClient, index: int) -> None:
+        nonlocal failures
+        for step in range(per_client):
+            body = {
+                "subject_id": f"conc-{index:03d}-{step:05d}",
+                "features": FEATURES,
+            }
+            started = time.perf_counter_ns()
+            response = await client.post("/v1/predict", json=body, headers=headers)
+            samples.append(float(time.perf_counter_ns() - started))
+            failures += response.status_code != 200
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://router") as client:
+        await asyncio.gather(*(worker(client, i) for i in range(min(clients, 4))))  # warmup
+        samples.clear()
+        failures = 0
+        started = time.perf_counter()
+        await asyncio.gather(*(worker(client, i) for i in range(clients)))
+        elapsed = time.perf_counter() - started
+    micros = np.asarray(samples, dtype=np.float64) / 1_000.0
+    return {
+        "clients": float(clients),
+        "runs": float(micros.size),
+        "failed_requests": float(failures),
+        "p50_us": round(float(np.percentile(micros, 50)), 1),
+        "p99_us": round(float(np.percentile(micros, 99)), 1),
+        "throughput_per_second": round(micros.size / elapsed, 1),
+    }
+
+
+def bench_concurrency(workdir: Path, registry: DemoRegistry, requests: int) -> dict[str, Any]:
+    """Champion-only traffic from one client and from several, to show scoring is off the loop."""
+    _prepare(workdir, registry)
+    app = build_router_app(_settings(workdir, registry), background=False)
+    runtime = app.state.runtime
+    if not isinstance(runtime, RouterRuntime):  # pragma: no cover - wiring guard
+        raise TypeError("router app did not expose its runtime")
+    runtime.refresh()  # the app is driven without its lifespan, so load the champion here
+    rows = {
+        str(clients): asyncio.run(_concurrent(app, requests, clients)) for clients in CONCURRENCY
+    }
+    runtime.flush()
+    return rows
+
+
 def run(requests: int) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -246,12 +359,20 @@ def run(requests: int) -> dict[str, Any]:
                 counters = _shadow_counters(client)
                 runtime.flush()
             modes[mode] = {**latency, "shadow": counters}
+        concurrency_dir = root / "concurrency"
+        concurrency_dir.mkdir()
+        concurrency = bench_concurrency(concurrency_dir, registry, max(requests // 4, 100))
 
     baseline = modes["champion_only"]
     for payload in modes.values():
         payload["added_p99_ms"] = round((payload["p99_us"] - baseline["p99_us"]) / 1_000.0, 4)
         payload["added_p50_ms"] = round((payload["p50_us"] - baseline["p50_us"]) / 1_000.0, 4)
-    return {"requests": requests, "modes": modes, "offer": bench_offer()}
+    return {
+        "requests": requests,
+        "modes": modes,
+        "offer": {**bench_offer(), **bench_round_trip()},
+        "concurrency": concurrency,
+    }
 
 
 def metrics(results: dict[str, Any]) -> dict[str, dict[str, float]]:
@@ -263,6 +384,16 @@ def metrics(results: dict[str, Any]) -> dict[str, dict[str, float]]:
             "hanging_added_p50_ms": float(modes["shadow_hanging"]["added_p50_ms"]),
             "hanging_failed_requests": float(modes["shadow_hanging"]["failed_requests"]),
             "in_process_failed_requests": float(modes["shadow_in_process"]["failed_requests"]),
+        },
+        "shadow_forwarding": {
+            "stub_added_p99_ms": float(modes["shadow_stub"]["added_p99_ms"]),
+            "stub_added_p50_ms": float(modes["shadow_stub"]["added_p50_ms"]),
+            "stub_failed_requests": float(modes["shadow_stub"]["failed_requests"]),
+        },
+        "concurrency": {
+            "failed_requests": sum(
+                float(row["failed_requests"]) for row in results["concurrency"].values()
+            )
         },
         "request_path_cost": {
             "offer_queued_p99_us": float(offer["forwarder_offer_queued"]["p99_us"]),
@@ -311,6 +442,22 @@ def main(argv: list[str] | None = None) -> int:
         [
             [name, f"{row['runs']:.0f}", f"{row['p50_us']}", f"{row['p99_us']}"]
             for name, row in results["offer"].items()
+        ],
+    )
+    print()
+    print("POST /v1/predict, champion only, N requests in flight at once (scoring off the loop)")
+    print_table(
+        ["clients", "runs", "p50 (us)", "p99 (us)", "throughput (req/s)", "failed"],
+        [
+            [
+                f"{row['clients']:.0f}",
+                f"{row['runs']:.0f}",
+                f"{row['p50_us']}",
+                f"{row['p99_us']}",
+                f"{row['throughput_per_second']}",
+                f"{row['failed_requests']:.0f}",
+            ]
+            for row in results["concurrency"].values()
         ],
     )
     if args.check:

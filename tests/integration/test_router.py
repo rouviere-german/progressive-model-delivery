@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from progressive_model_delivery.registry.signing import SigningKey
 from progressive_model_delivery.serving.assignment import Arm, assign, subject_hash
 from progressive_model_delivery.serving.router import RouterRuntime, build_router_app
+from progressive_model_delivery.serving.schemas import PredictRequest, PredictResponse
 from tests.integration.conftest import AUTH, FEATURES, SUBJECT_SECRET, ControlEnv
 
 pytestmark = pytest.mark.integration
@@ -207,3 +209,32 @@ def test_predict_requires_an_api_key_and_a_safe_subject_id(router: TestClient) -
 
 def test_arm_enum_values_are_the_logged_values() -> None:
     assert {str(arm) for arm in Arm} == {"champion", "challenger"}
+
+
+def test_scoring_runs_off_the_event_loop(
+    router: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocking scorer on the loop serialises every concurrent request behind it.
+
+    ``RouterRuntime.predict`` calls LightGBM and appends to a Parquet buffer, both blocking, so the
+    handler hands it to a worker thread the way the shadow worker does. A thread running the event
+    loop answers ``asyncio.get_running_loop()``; a worker thread raises, which is what this asserts.
+    """
+    seen: list[bool] = []
+    original = RouterRuntime.predict
+
+    def recording(
+        self: RouterRuntime, request: PredictRequest
+    ) -> tuple[PredictResponse, dict[str, object] | None]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            seen.append(False)
+        else:
+            seen.append(True)
+        return original(self, request)
+
+    monkeypatch.setattr(RouterRuntime, "predict", recording)
+    _predict(router, "cust-0000042")
+    _predict(router, "cust-0000043")
+    assert seen == [False, False]

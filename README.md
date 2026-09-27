@@ -106,7 +106,9 @@ the router actually issued, only inside the maturation window, and only once.
 **Shadow path.** `offer()` is a non-blocking `put_nowait` on a bounded queue; a full queue drops
 and counts. A pool of tasks posts jobs to the shadow worker with a hard timeout. In compose the
 worker is a separate container on a network declared `internal: true`, so it has no route off that
-bridge and holds no credentials for anything with a side effect.
+bridge and holds no credentials for anything with a side effect; it mounts the shared state volume
+read-only and writes only its own prediction segments, so it cannot touch the control database or
+the router's log either.
 
 **Evidence** (`control/evidence.py`). One DuckDB query joins the router log, the shadow log and the
 labels at a cutoff, keeping only requests whose label window has closed, deduplicating labels, and
@@ -353,9 +355,10 @@ side.
   the control plane keeps configured floors under it -- `APP_MAX_SPEC_ALPHA`,
   `APP_REQUIRED_GUARDRAILS`, and a maturation window at least as long as the router's label TTL --
   and review covers what those floors do not.
-- **Shadow isolation.** No egress, no side-effect credentials, bounded queue, hard timeout,
-  drop-on-overflow. Fault injection proves a crashing, hanging or erroring challenger costs
-  dropped shadow jobs and nothing else.
+- **Shadow isolation.** No egress, no side-effect credentials, no write access to the control
+  database or the router's prediction log, bounded queue, hard timeout, drop-on-overflow. Fault
+  injection proves a crashing, hanging or erroring challenger costs dropped shadow jobs and nothing
+  else.
 - **Feedback integrity.** Labels only for request ids the router issued, only within the
   maturation window, deduplicated, and separately rate limited -- otherwise anyone who can reach
   `/v1/feedback` can poison the metric that decides the rollout.

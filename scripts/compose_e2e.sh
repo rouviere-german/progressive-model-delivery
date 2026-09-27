@@ -10,7 +10,8 @@
 #      exists, because it has nothing it is willing to load;
 #   2. a release manager can bootstrap a champion and the router then serves predictions;
 #   3. shadow requests really cross the container boundary (the shadow worker's own counter moves);
-#   4. the shadow worker has no egress: it cannot open a connection off the internal bridge;
+#   4. the shadow worker has no egress: it cannot open a connection off the internal bridge, and
+#      no write access to the control database or the router's prediction log;
 #   5. killing the shadow worker does not fail a single champion response, and the undeliverable
 #      jobs are counted rather than retried into the request path;
 #   6. the image can run the whole offline demo (rollback with audit evidence, then an approved
@@ -155,6 +156,30 @@ socket.create_connection(('1.1.1.1', 443))
 " 2>/dev/null; then
   fail "the shadow worker opened an outbound connection; the internal network is not isolating it"
 fi
+
+echo "== the shadow worker can write its own log and nothing else"
+docker compose exec -T shadow python - <<'PY' || exit 1
+import pathlib
+import sys
+
+denied = [
+    "/var/lib/pmd/control.sqlite",
+    "/var/lib/pmd/predlog/router/probe.parquet",
+    "/var/lib/pmd/registry/probe",
+]
+for name in denied:
+    try:
+        with pathlib.Path(name).open("ab"):
+            pass
+    except OSError:
+        continue
+    print(f"FAIL: the shadow worker can write {name}")
+    sys.exit(1)
+own = pathlib.Path("/var/lib/pmd/predlog/shadow/probe")
+own.write_bytes(b"")
+own.unlink()
+print("shadow filesystem: own log writable, control plane and router log are not")
+PY
 
 # --- 5. a dead shadow worker does not touch the champion ----------------------------------------
 echo "== kill the shadow worker; champion responses must not change"

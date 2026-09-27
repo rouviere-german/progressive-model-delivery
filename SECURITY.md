@@ -74,7 +74,10 @@ These are deliberate and are not vulnerabilities to report:
   HSM or key revocation list.
 - Role bindings are API keys. One person holding two keys defeats the two-person rules; that is an
   operational control, not a technical one.
-- The audit chain is not anchored anywhere external. Export the head off-box if truncation matters.
+- The audit chain is an unkeyed SHA-256 chain, so it detects edits by anyone who cannot recompute
+  it. Write access to `control.sqlite` is enough to forge a consistent replacement chain, whether
+  shorter or different; the head that `audit --export` records off-box is the only defence against
+  both. Signing entries with the release key would make the chain authenticated; that is not done.
 - Rate limiting is per process and in memory. Behind a proxy, all clients share one address unless
   proxy headers are trusted.
 - Only the subgroups in the data contract are monitored. The README Non-goals section lists the

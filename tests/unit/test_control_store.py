@@ -389,3 +389,30 @@ def test_shadow_lifecycle_transitions_used_by_the_store(store: ControlStore) -> 
     with store.transaction() as conn:
         store.set_lifecycle(conn, "a" * 64, Staged().start_shadow())
         assert store.lifecycle_in(conn, "a" * 64) == Shadow()
+
+
+def test_a_recomputed_chain_verifies_and_only_the_recorded_head_catches_it(
+    store: ControlStore,
+) -> None:
+    """The chain is unkeyed, so write access to the database is enough to rewrite history.
+
+    This is the residual risk in `docs/THREAT_MODEL.md` R2, as a test rather than a sentence: an
+    attacker who deletes the tail and appends their own entries through the store's own writer
+    produces a chain that verifies. Only the head recorded elsewhere disagrees.
+    """
+    _append(store, 4)
+    head = store.verify_audit().head
+    with closing(sqlite3.connect(store.path)) as conn:
+        conn.execute("DELETE FROM audit WHERE seq >= 2")
+        conn.commit()
+    with store.transaction() as conn:
+        store.append_audit(
+            conn, actor="attacker", action="promoted", rollout_id=None, data={"forged": True}
+        )
+    forged = store.verify_audit()
+    assert forged.ok  # nothing in the chain itself gives the rewrite away
+    assert forged.entries == 3
+    assert forged.head != head
+    anchored = store.verify_audit(expect_head=head)
+    assert not anchored.ok
+    assert anchored.error == "head mismatch (truncated)"

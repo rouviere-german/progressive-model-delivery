@@ -49,11 +49,13 @@
   },
   "serving": {
     "shadow_isolation": {
-      "hanging_added_p50_ms": 3.0,
-      "hanging_added_p99_ms": 10.0,
+      "hanging_added_p50_ms": 1.0,
+      "hanging_added_p99_ms": 5.0,
       "hanging_failed_requests": 0,
       "in_process_failed_requests": 0
     },
+    "shadow_forwarding": {"stub_added_p50_ms": 3.0, "stub_added_p99_ms": 4.0, "stub_failed_requests": 0},
+    "concurrency": {"failed_requests": 0},
     "request_path_cost": {"offer_queued_p99_us": 50, "offer_dropped_p99_us": 50}
   }
 }

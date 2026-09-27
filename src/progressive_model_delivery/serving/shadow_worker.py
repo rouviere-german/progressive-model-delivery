@@ -2,10 +2,16 @@
 
 It runs as a separate process (its own container on an internal-only network in compose). Its
 only inputs are shadow jobs from the router, authenticated with a shared token, and its only
-output is shadow prediction records in its own log directory. It holds no API keys, no role
-bindings and no control-plane access: it cannot change a rollout, answer a customer or reach the
+output is shadow prediction records in its own log directory. It holds no API keys and no role
+bindings, so it has no control-plane credentials, and it cannot answer a customer or reach the
 network beyond its internal peer. It verifies every release's signature before loading it, like
 the router.
+
+Two things make "no control-plane access" more than a statement about credentials, and both live in
+``docker-compose.yml`` rather than here: the internal-only network, and a read-only mount of the
+shared state volume with a separate writable volume for this worker's own segments. Otherwise a
+compromised worker could rewrite ``control.sqlite`` or the router's prediction log -- the input to
+every guardrail -- with no credential at all. ``scripts/compose_e2e.sh`` asserts both.
 """
 
 from __future__ import annotations

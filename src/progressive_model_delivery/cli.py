@@ -113,12 +113,17 @@ def _bootstrap(root: Path, key_path: Path | None) -> int:
 
     key = SigningKey.generate()
     models = build_demo_models(root, key)
+    # Create the prediction-log tree while this process still has the state volume writable: the
+    # shadow worker mounts it read-only apart from its own segment directory (docker-compose.yml).
+    for name in ("router", "shadow", "labels"):
+        (root / "predlog" / name).mkdir(parents=True, exist_ok=True)
     if key_path is not None:
         key.save(key_path)
     print(
         json.dumps(
             {
                 "registry_dir": str(root / "registry"),
+                "predlog_dir": str(root / "predlog"),
                 "public_key_b64": key.public().to_b64(),
                 "private_key_file": None if key_path is None else str(key_path),
                 "releases": {name: models.release_id(name) for name in sorted(models.releases)},

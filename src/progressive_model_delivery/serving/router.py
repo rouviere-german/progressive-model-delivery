@@ -6,7 +6,9 @@ Request path (``POST /v1/predict``):
 2. Pick the arm: champion, unless a canary stage is active and the subject's consistent-hash
    bucket falls under the canary weight.
 3. Score with the chosen verified model, measure latency, log the prediction (arm, weight,
-   release, subgroup, features, no raw subject id) and remember the request id for feedback.
+   release, subgroup, features, no raw subject id) and remember the request id for feedback. The
+   scoring call blocks, so the handler runs it in a worker thread (``asyncio.to_thread``) rather
+   than on the event loop; ``bench/bench_serving.py`` measures the difference under concurrency.
 4. Respond. In the shadow stage the job for the shadow worker is offered to the bounded
    forwarder only after the response is ready (FastAPI background task, ``put_nowait``).
 
@@ -408,7 +410,10 @@ def build_router_app(
         body: PredictRequest, principal: AuthenticatedPrincipal, background_tasks: BackgroundTasks
     ) -> PredictResponse:
         del principal
-        response, job = runtime.predict(body)
+        # Scoring blocks (LightGBM, then a Parquet buffer append), so it runs in a worker thread --
+        # the same hop the shadow worker makes. On the event loop it would serialise concurrent
+        # requests behind each other and behind the refresh and flush loops.
+        response, job = await asyncio.to_thread(runtime.predict, body)
         if job is not None and runtime.forwarder is not None:
             background_tasks.add_task(runtime.forwarder.offer, job)
         return response

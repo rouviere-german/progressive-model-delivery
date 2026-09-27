@@ -15,6 +15,12 @@
 # untrusted code as far as the customer's request is concerned. The router reaches it by service
 # name and gives up after APP_SHADOW_TIMEOUT_SECONDS.
 #
+# The same isolation on the filesystem: `shadow` mounts the shared `state` volume read-only and
+# gets its own `shadow_log` volume for the only thing it writes, its prediction segments. Without
+# that split it could rewrite control.sqlite (the champion pointer, the rollout state, the audit
+# chain) and the router's own log, which is the input to every guardrail -- `read_only: true` in
+# x-hardening covers the container's root filesystem, never a named volume.
+#
 # Run it:
 #   export APP_API_KEY_SHA256=... APP_ROLE_BINDINGS=...   # see .env.example
 #   docker compose run --rm bootstrap                     # train + publish signed releases
@@ -93,7 +99,8 @@ services:
     mem_limit: 512m
     cpus: 1.0
 
-  # No ports, no edge network, no egress: only the router can reach it, and only inbound.
+  # No ports, no edge network, no egress: only the router can reach it, and only inbound. Its only
+  # writable path is its own prediction log.
   shadow:
     <<: [*image, *hardening]
     command: ["serve", "--role", "shadow"]
@@ -101,7 +108,10 @@ services:
       <<: *env
       APP_SHADOW_TOKEN: ${APP_SHADOW_TOKEN:?set APP_SHADOW_TOKEN (>= 16 chars)}
     volumes:
-      - state:/var/lib/pmd
+      # Releases to verify and load, and the log tree to write into: read-only ...
+      - state:/var/lib/pmd:ro
+      # ... except its own segment directory. `bootstrap` creates the tree before this starts.
+      - shadow_log:/var/lib/pmd/predlog/shadow
     tmpfs:
       - /tmp:size=16m
     networks:
@@ -134,6 +144,8 @@ services:
       APP_RECONCILE_INTERVAL_SECONDS: "5"
     volumes:
       - state:/var/lib/pmd
+      # The shadow worker's segments are evidence, so the controller reads them -- read-only.
+      - shadow_log:/var/lib/pmd/predlog/shadow:ro
     tmpfs:
       - /tmp:size=16m
     networks:
@@ -169,4 +181,6 @@ networks:
 
 volumes:
   state:
+  # Written only by the shadow worker, read by the controller.
+  shadow_log:
   demo:

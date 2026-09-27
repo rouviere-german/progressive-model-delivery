@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
+
 import pytest
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from progressive_model_delivery.core import tracing
@@ -26,10 +29,22 @@ def test_provider_records_spans_without_global_state() -> None:
 
 
 def test_console_exporter_can_be_selected() -> None:
+    """The console exporter must actually format and write the span, not just be configured."""
     provider = build_tracer_provider("svc", "console")
-    with provider.get_tracer("t").start_as_current_span("work"):
+    processors = provider._active_span_processor._span_processors
+    assert len(processors) == 1
+    exporter = processors[0].span_exporter  # type: ignore[attr-defined]
+    assert isinstance(exporter, ConsoleSpanExporter)
+    # ConsoleSpanExporter binds sys.stdout as a default argument at import time, so redirect the
+    # exporter's own stream rather than the process's.
+    stream = io.StringIO()
+    exporter.out = stream
+    with provider.get_tracer("t").start_as_current_span("console-work"):
         pass
-    provider.shutdown()
+    provider.shutdown()  # flushes the batch processor
+    printed = stream.getvalue()
+    assert '"name": "console-work"' in printed
+    assert '"service.name": "svc"' in printed
 
 
 def test_global_provider_is_installed_once(monkeypatch: pytest.MonkeyPatch) -> None:
