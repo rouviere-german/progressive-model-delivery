@@ -1,5 +1,57 @@
 {
-  "redact_text_1kb": {"p95_us": 3000},
-  "rate_limiter_check": {"p95_us": 50},
-  "drift_check_10k_vs_10k": {"p95_us": 40000}
+  "baseline": {
+    "redact_text_1kb": {"p95_us": 3000},
+    "rate_limiter_check": {"p95_us": 50},
+    "subject_hash": {"p95_us": 60},
+    "assignment": {"p95_us": 40},
+    "beta_mixture_e_value": {"p95_us": 800},
+    "paired_msprt": {"p95_us": 400},
+    "reconcile_decision_5_stages": {"p95_us": 40000},
+    "audit_append_one_entry": {"p95_us": 60000},
+    "audit_verify_1000_entries": {"p95_us": 250000},
+    "psi_10k_vs_10k": {"p95_us": 3000},
+    "drift_check_10k_vs_10k": {"p95_us": 25000}
+  },
+  "validity": {
+    "aa_false_rollback": {"rate": 0.025, "ci95_upper": 0.045},
+    "false_promotion": {"rate": 0.025, "ci95_upper": 0.045},
+    "naive_peeking": {"minus_rate": -0.2},
+    "inferior_caught": {"minus_rate": -0.95},
+    "confidence_sequences": {
+      "beta_binomial_miss_rate_p0.05": 0.08,
+      "beta_binomial_miss_rate_p0.2": 0.08,
+      "beta_binomial_miss_rate_p0.5": 0.08,
+      "normal_mixture_miss_rate": 0.08
+    }
+  },
+  "power": {
+    "detection": {
+      "minus_error_+1pp": -0.9,
+      "minus_error_+2pp": -0.98,
+      "minus_error_+5pp": -0.98,
+      "minus_latency_+20ms": -0.98,
+      "minus_subgroup_south_+5pp": -0.9,
+      "minus_subgroup_worse": -0.7,
+      "minus_feature_order_bug": -0.98
+    },
+    "exposure": {
+      "error_+1pp_median": 200,
+      "error_+2pp_median": 200,
+      "error_+5pp_median": 200,
+      "latency_+20ms_median": 200,
+      "subgroup_south_+5pp_median": 1500,
+      "subgroup_worse_median": 8000,
+      "feature_order_bug_median": 200
+    },
+    "better_challenger": {"minus_promotion_rate": -0.9, "rollback_rate": 0.05}
+  },
+  "serving": {
+    "shadow_isolation": {
+      "hanging_added_p50_ms": 3.0,
+      "hanging_added_p99_ms": 10.0,
+      "hanging_failed_requests": 0,
+      "in_process_failed_requests": 0
+    },
+    "request_path_cost": {"offer_queued_p99_us": 50, "offer_dropped_p99_us": 50}
+  }
 }

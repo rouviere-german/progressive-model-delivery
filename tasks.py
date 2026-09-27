@@ -7,19 +7,18 @@ Targets:
   format     ruff format + ruff check --fix
   typecheck  mypy --strict (configured in pyproject.toml)
   test       pytest with coverage (fails under the floor in pyproject.toml)
-  bench      benchmarks with regression thresholds (bench/thresholds.json)
-  demo       offline demo (FakeProvider, no API key)
+  bench      all benchmarks with regression thresholds (bench/thresholds.json)
+  study      the full statistical study (more rollouts than CI runs; minutes)
+  demo       the offline end-to-end demo (two rollouts, no API key, no network)
   bandit     bandit static analysis of src/
   pip-audit  pip-audit of the locked dependency set
   audit      bandit + pip-audit
   baseline   scripts/check_baseline.py
-  record     optional, budget-capped cassette recording (needs ANTHROPIC_API_KEY)
   check      lint + typecheck + test + audit + baseline
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -61,13 +60,23 @@ def test() -> None:
     _run(PY, "-m", "pytest", "--cov", "--cov-report=term-missing", "--cov-report=xml")
 
 
+BENCHES = ("baseline", "validity", "power", "serving")
+
+
 def bench() -> None:
-    _run(PY, "bench/bench_baseline.py", "--check")
+    for name in BENCHES:
+        _run(PY, f"bench/bench_{name}.py", "--check")
+
+
+def study() -> None:
+    """The full-size statistical study; CI runs the smaller default sizes."""
+    _run(PY, "bench/bench_validity.py", "--rollouts", "10000", "--check")
+    _run(PY, "bench/bench_power.py", "--rollouts", "2000", "--check")
 
 
 def demo() -> None:
     package = str(_pyproject()["tool"]["portfolio"]["package"])
-    _run(PY, "-m", package, "demo")
+    _run(PY, "-m", package, "demo", "--workdir", "var/demo")
 
 
 def bandit() -> None:
@@ -118,15 +127,6 @@ def baseline() -> None:
     _run(PY, "scripts/check_baseline.py")
 
 
-def record() -> None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("record needs ANTHROPIC_API_KEY; tests, demo and bench never do.")
-    raise SystemExit(
-        "The template has no recording workflow. Repos add bench/record.py that wraps "
-        "AnthropicProvider in RecordingProvider with a BudgetLedger cap."
-    )
-
-
 def check() -> None:
     for task in (lint, typecheck, test, audit, baseline):
         task()
@@ -138,12 +138,12 @@ TASKS: dict[str, Callable[[], None]] = {
     "typecheck": typecheck,
     "test": test,
     "bench": bench,
+    "study": study,
     "demo": demo,
     "bandit": bandit,
     "pip-audit": pip_audit,
     "audit": audit,
     "baseline": baseline,
-    "record": record,
     "check": check,
 }
 

@@ -5,7 +5,7 @@ UV ?= uv
 TASK := $(UV) run python tasks.py
 IMAGE ?= progressive-model-delivery:local
 
-.PHONY: install lint format typecheck test bench demo bandit pip-audit audit baseline record check docker-build compose-up
+.PHONY: install lint format typecheck test bench study demo bandit pip-audit audit baseline check docker-build compose-up compose-e2e
 
 install:
 	$(UV) sync --frozen
@@ -25,6 +25,9 @@ test:
 bench:
 	$(TASK) bench
 
+study:
+	$(TASK) study
+
 demo:
 	$(TASK) demo
 
@@ -40,9 +43,6 @@ audit:
 baseline:
 	$(TASK) baseline
 
-record:
-	$(TASK) record
-
 check:
 	$(TASK) check
 
@@ -51,3 +51,7 @@ docker-build:
 
 compose-up:
 	docker compose up --build
+
+# The real topology: router and shadow worker in separate containers, shadow with no egress.
+compose-e2e:
+	scripts/compose_e2e.sh

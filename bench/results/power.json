@@ -1,0 +1,377 @@
+{
+  "machine": {
+    "cpu_count": 6,
+    "numpy": "2.5.3",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "python": "3.12.14"
+  },
+  "results": {
+    "better_challenger": {
+      "full": {
+        "aborted": 0,
+        "breaches": {},
+        "look_size": 2000,
+        "looks": 31,
+        "mean_exposure_to_rollback": null,
+        "median_exposure_to_rollback": null,
+        "median_looks_to_promotion": 15.0,
+        "median_looks_to_rollback": null,
+        "open_at_end": 0,
+        "promotion_rate": 1.0,
+        "promotion_rate_ci95": [
+          0.99082,
+          1.0
+        ],
+        "promotion_requested": 400,
+        "rollback_rate": 0.0,
+        "rollback_rate_ci95": [
+          0.0,
+          0.00918
+        ],
+        "rolled_back": 0,
+        "rollouts": 400,
+        "scenario": "measured_better"
+      },
+      "median_looks_to_promotion": 15.0,
+      "promotion_rate": 1.0,
+      "rollback_rate": 0.0,
+      "scenario": "measured_better"
+    },
+    "max_looks": 60,
+    "requests_per_look": 2000,
+    "rollouts": 400,
+    "scenarios": {
+      "error_+1pp": {
+        "breaches": {
+          "error_rate": 31,
+          "log_loss": 391,
+          "worst_subgroup_error[east]": 2,
+          "worst_subgroup_error[north]": 4
+        },
+        "canary_only_detection_rate": 0.9475,
+        "canary_only_median_exposure": 12571.0,
+        "detection_rate": 1.0,
+        "fixed_horizon_requests_80pct": 51165,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "error_rate": 31,
+            "log_loss": 391,
+            "worst_subgroup_error[east]": 2,
+            "worst_subgroup_error[north]": 4
+          },
+          "look_size": 2000,
+          "looks": 60,
+          "mean_exposure_to_rollback": 612.98,
+          "median_exposure_to_rollback": 0.0,
+          "median_looks_to_promotion": null,
+          "median_looks_to_rollback": 2.0,
+          "open_at_end": 0,
+          "promotion_rate": 0.0,
+          "promotion_rate_ci95": [
+            0.0,
+            0.00918
+          ],
+          "promotion_requested": 0,
+          "rollback_rate": 1.0,
+          "rollback_rate_ci95": [
+            0.99082,
+            1.0
+          ],
+          "rolled_back": 400,
+          "rollouts": 400,
+          "scenario": "error_+1pp"
+        },
+        "median_exposure": 0.0,
+        "median_looks_to_rollback": 2.0,
+        "promotion_rate": 0.0,
+        "scenario": "error_+1pp",
+        "worst_subgroup_gap_pp": 1.0
+      },
+      "error_+2pp": {
+        "breaches": {
+          "error_rate": 175,
+          "log_loss": 400,
+          "worst_subgroup_error[east]": 11,
+          "worst_subgroup_error[north]": 25,
+          "worst_subgroup_error[south]": 1,
+          "worst_subgroup_error[west]": 2
+        },
+        "canary_only_detection_rate": 1.0,
+        "canary_only_median_exposure": 3652.0,
+        "detection_rate": 1.0,
+        "fixed_horizon_requests_80pct": 13019,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "error_rate": 175,
+            "log_loss": 400,
+            "worst_subgroup_error[east]": 11,
+            "worst_subgroup_error[north]": 25,
+            "worst_subgroup_error[south]": 1,
+            "worst_subgroup_error[west]": 2
+          },
+          "look_size": 2000,
+          "looks": 1,
+          "mean_exposure_to_rollback": 0.0,
+          "median_exposure_to_rollback": 0.0,
+          "median_looks_to_promotion": null,
+          "median_looks_to_rollback": 1.0,
+          "open_at_end": 0,
+          "promotion_rate": 0.0,
+          "promotion_rate_ci95": [
+            0.0,
+            0.00918
+          ],
+          "promotion_requested": 0,
+          "rollback_rate": 1.0,
+          "rollback_rate_ci95": [
+            0.99082,
+            1.0
+          ],
+          "rolled_back": 400,
+          "rollouts": 400,
+          "scenario": "error_+2pp"
+        },
+        "median_exposure": 0.0,
+        "median_looks_to_rollback": 1.0,
+        "promotion_rate": 0.0,
+        "scenario": "error_+2pp",
+        "worst_subgroup_gap_pp": 2.0
+      },
+      "error_+5pp": {
+        "breaches": {
+          "error_rate": 400,
+          "log_loss": 400,
+          "worst_subgroup_error[east]": 229,
+          "worst_subgroup_error[north]": 327,
+          "worst_subgroup_error[south]": 31,
+          "worst_subgroup_error[west]": 114
+        },
+        "canary_only_detection_rate": 1.0,
+        "canary_only_median_exposure": 1106.0,
+        "detection_rate": 1.0,
+        "fixed_horizon_requests_80pct": 2188,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "error_rate": 400,
+            "log_loss": 400,
+            "worst_subgroup_error[east]": 229,
+            "worst_subgroup_error[north]": 327,
+            "worst_subgroup_error[south]": 31,
+            "worst_subgroup_error[west]": 114
+          },
+          "look_size": 2000,
+          "looks": 1,
+          "mean_exposure_to_rollback": 0.0,
+          "median_exposure_to_rollback": 0.0,
+          "median_looks_to_promotion": null,
+          "median_looks_to_rollback": 1.0,
+          "open_at_end": 0,
+          "promotion_rate": 0.0,
+          "promotion_rate_ci95": [
+            0.0,
+            0.00918
+          ],
+          "promotion_requested": 0,
+          "rollback_rate": 1.0,
+          "rollback_rate_ci95": [
+            0.99082,
+            1.0
+          ],
+          "rolled_back": 400,
+          "rollouts": 400,
+          "scenario": "error_+5pp"
+        },
+        "median_exposure": 0.0,
+        "median_looks_to_rollback": 1.0,
+        "promotion_rate": 0.0,
+        "scenario": "error_+5pp",
+        "worst_subgroup_gap_pp": 5.0
+      },
+      "feature_order_bug": {
+        "breaches": {
+          "error_rate": 400,
+          "log_loss": 400,
+          "worst_subgroup_error[east]": 310,
+          "worst_subgroup_error[north]": 400,
+          "worst_subgroup_error[south]": 169,
+          "worst_subgroup_error[west]": 246
+        },
+        "canary_only_detection_rate": 1.0,
+        "canary_only_median_exposure": 628.0,
+        "detection_rate": 1.0,
+        "fixed_horizon_requests_80pct": 6716,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "error_rate": 400,
+            "log_loss": 400,
+            "worst_subgroup_error[east]": 310,
+            "worst_subgroup_error[north]": 400,
+            "worst_subgroup_error[south]": 169,
+            "worst_subgroup_error[west]": 246
+          },
+          "look_size": 2000,
+          "looks": 1,
+          "mean_exposure_to_rollback": 0.0,
+          "median_exposure_to_rollback": 0.0,
+          "median_looks_to_promotion": null,
+          "median_looks_to_rollback": 1.0,
+          "open_at_end": 0,
+          "promotion_rate": 0.0,
+          "promotion_rate_ci95": [
+            0.0,
+            0.00918
+          ],
+          "promotion_requested": 0,
+          "rollback_rate": 1.0,
+          "rollback_rate_ci95": [
+            0.99082,
+            1.0
+          ],
+          "rolled_back": 400,
+          "rollouts": 400,
+          "scenario": "measured_feature_order_bug"
+        },
+        "median_exposure": 0.0,
+        "median_looks_to_rollback": 1.0,
+        "promotion_rate": 0.0,
+        "scenario": "measured_feature_order_bug",
+        "worst_subgroup_gap_pp": 8.111
+      },
+      "latency_+20ms": {
+        "breaches": {
+          "latency_slo": 400
+        },
+        "canary_only_detection_rate": 1.0,
+        "canary_only_median_exposure": 19.0,
+        "detection_rate": 1.0,
+        "fixed_horizon_requests_80pct": null,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "latency_slo": 400
+          },
+          "look_size": 2000,
+          "looks": 1,
+          "mean_exposure_to_rollback": 0.0,
+          "median_exposure_to_rollback": 0.0,
+          "median_looks_to_promotion": null,
+          "median_looks_to_rollback": 1.0,
+          "open_at_end": 0,
+          "promotion_rate": 0.0,
+          "promotion_rate_ci95": [
+            0.0,
+            0.00918
+          ],
+          "promotion_requested": 0,
+          "rollback_rate": 1.0,
+          "rollback_rate_ci95": [
+            0.99082,
+            1.0
+          ],
+          "rolled_back": 400,
+          "rollouts": 400,
+          "scenario": "latency_+20ms"
+        },
+        "median_exposure": 0.0,
+        "median_looks_to_rollback": 1.0,
+        "promotion_rate": 0.0,
+        "scenario": "latency_+20ms",
+        "worst_subgroup_gap_pp": 0.0
+      },
+      "subgroup_south_+5pp": {
+        "breaches": {
+          "error_rate": 7,
+          "latency_slo": 1,
+          "log_loss": 1,
+          "worst_subgroup_error[south]": 379
+        },
+        "canary_only_detection_rate": 0.81,
+        "canary_only_median_exposure": 13414.0,
+        "detection_rate": 0.96,
+        "fixed_horizon_requests_80pct": 18233,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "error_rate": 7,
+            "latency_slo": 1,
+            "log_loss": 1,
+            "worst_subgroup_error[south]": 379
+          },
+          "look_size": 2000,
+          "looks": 60,
+          "mean_exposure_to_rollback": 4652.45,
+          "median_exposure_to_rollback": 630.5,
+          "median_looks_to_promotion": 32.0,
+          "median_looks_to_rollback": 5.0,
+          "open_at_end": 5,
+          "promotion_rate": 0.0275,
+          "promotion_rate_ci95": [
+            0.01381,
+            0.04867
+          ],
+          "promotion_requested": 11,
+          "rollback_rate": 0.96,
+          "rollback_rate_ci95": [
+            0.93585,
+            0.97697
+          ],
+          "rolled_back": 384,
+          "rollouts": 400,
+          "scenario": "subgroup_south_+5pp"
+        },
+        "median_exposure": 630.5,
+        "median_looks_to_rollback": 5.0,
+        "promotion_rate": 0.0275,
+        "scenario": "subgroup_south_+5pp",
+        "worst_subgroup_gap_pp": 5.0
+      },
+      "subgroup_worse": {
+        "breaches": {
+          "worst_subgroup_error[south]": 350
+        },
+        "canary_only_detection_rate": 0.4475,
+        "canary_only_median_exposure": 12728.0,
+        "detection_rate": 0.875,
+        "fixed_horizon_requests_80pct": 21166,
+        "full": {
+          "aborted": 0,
+          "breaches": {
+            "worst_subgroup_error[south]": 350
+          },
+          "look_size": 2000,
+          "looks": 52,
+          "mean_exposure_to_rollback": 3975.1,
+          "median_exposure_to_rollback": 1652.0,
+          "median_looks_to_promotion": 32.0,
+          "median_looks_to_rollback": 8.0,
+          "open_at_end": 0,
+          "promotion_rate": 0.125,
+          "promotion_rate_ci95": [
+            0.09422,
+            0.16146
+          ],
+          "promotion_requested": 50,
+          "rollback_rate": 0.875,
+          "rollback_rate_ci95": [
+            0.83854,
+            0.90578
+          ],
+          "rolled_back": 350,
+          "rollouts": 400,
+          "scenario": "measured_subgroup_worse"
+        },
+        "median_exposure": 1652.0,
+        "median_looks_to_rollback": 8.0,
+        "promotion_rate": 0.125,
+        "scenario": "measured_subgroup_worse",
+        "worst_subgroup_gap_pp": 4.424
+      }
+    },
+    "seconds": 39.6
+  }
+}
