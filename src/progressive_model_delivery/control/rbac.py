@@ -8,10 +8,11 @@ Roles (bound to API keys through ``APP_ROLE_BINDINGS``):
 * ``viewer``: reads rollouts, evidence and the audit chain.
 
 Automatic rollback by the controller needs no approval. Final promotion needs one release
-manager other than the proposer. Overrides (forcing a stage advance past its statistical gate)
-follow a two-person rule: they execute only once two *distinct* release managers have signed
-them, and they expire if the rollout moved on in the meantime. Every request, approval,
-refusal-worthy state and execution lands in the hash-chained audit log.
+manager other than the proposer, and the challenger's signature is verified again at that moment,
+because approval is the write that installs it as champion. Overrides (forcing a stage advance
+past its statistical gate) follow a two-person rule: they execute only once two *distinct* release
+managers have signed them, and they expire if the rollout moved on in the meantime. Every request,
+approval, refusal-worthy state and execution lands in the hash-chained audit log.
 
 One deployer proposing a weak policy is a real gap in that scheme -- the two-person rule covers
 overrides and promotion, not the spec a rollout is judged against -- so :class:`PolicyLimits` holds
@@ -210,6 +211,9 @@ class ControlService:
     def approve_promotion(self, principal: Principal, rollout_id: str) -> RolloutRecord:
         self.require(principal, Role.RELEASE_MANAGER)
         record = self._rollout(rollout_id)
+        # The bytes can change between the controller's last pass and a human's approval, and this
+        # is the write that makes them champion.
+        self._verified(record.challenger)
         if principal.name == record.proposed_by:
             raise _forbid("The proposer of a rollout cannot approve its promotion.")
         if record.status != "awaiting_approval":

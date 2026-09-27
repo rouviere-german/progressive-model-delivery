@@ -13,6 +13,7 @@ The three security properties under test:
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -459,3 +460,36 @@ def test_a_spec_that_breaches_a_floor_cannot_open_a_rollout(
     assert raised.value.code == "spec_refused"
     assert store.open_rollout() is None
     assert [entry.action for entry in store.audit_entries()] == ["champion_bootstrapped"]
+
+
+def test_a_challenger_tampered_before_approval_is_refused_not_installed(
+    tmp_path: Path, trained_registry: DemoRegistry, spec: RolloutSpec
+) -> None:
+    """Approval is the last gate before a release becomes champion, so it verifies again.
+
+    The controller re-verifies both manifests on every pass, and ``propose`` verifies before it
+    opens a rollout -- but a human approval happens minutes or hours later, and the bytes can change
+    in between. Installing an unverifiable champion turns a detectable supply-chain tamper into a
+    router that fails closed on its next refresh (an outage) instead of a refusal.
+    """
+    shutil.copytree(trained_registry.root / "registry", tmp_path / "registry")
+    store = ControlStore(tmp_path / "control.sqlite", clock=Clock())
+    releases = ReleaseStore(tmp_path / "registry")
+    control = ControlService(store, releases, trained_registry.trust)
+    champion = trained_registry.models.release_id("champion")
+    control.bootstrap(RAVI, champion)
+    record = _awaiting(control, store, trained_registry, spec)
+
+    release = trained_registry.models.releases["better"]
+    blob = releases.registry._blob_path(release.manifest.artifact_sha256)
+    blob.write_text(
+        blob.read_text(encoding="utf-8").replace("leaf_value=", "leaf_value=9", 1), encoding="utf-8"
+    )
+
+    with pytest.raises(AppError) as refused:
+        control.approve_promotion(RAVI, record.rollout_id)
+    assert refused.value.status_code == 422
+    assert refused.value.code == "untrusted_release"
+    assert store.champion() == champion
+    assert store.rollout(record.rollout_id).status == "awaiting_approval"
+    assert [entry.action for entry in store.audit_entries(record.rollout_id)][-1] != "promoted"
