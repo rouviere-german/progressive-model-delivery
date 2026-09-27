@@ -1,39 +1,60 @@
-"""Command line entry point: ``progressive-model-delivery`` or ``python -m <package>``."""
+"""Command line entry point: ``progressive-model-delivery`` or ``python -m <package>``.
+
+Subcommands:
+
+``serve``              run the router (``--role router``) or the controller and control API
+                      (``--role controller``) or the shadow worker (``--role shadow``).
+``demo``              the offline end-to-end demo (two rollouts, no network, no API key).
+``generate-api-key``  print a new API key and its SHA-256 digest.
+``role-binding``      print an ``APP_ROLE_BINDINGS`` entry for a principal and its roles.
+``audit``             verify or export the hash-chained audit log of a control database.
+``bootstrap``         train and publish the demo releases into a registry directory.
+"""
 
 from __future__ import annotations
 
 import argparse
-import importlib
-import importlib.util
 import json
 import sys
 from pathlib import Path
 
 __all__ = ["main"]
 
-_DEMOS = {
-    "ml": ("progressive_model_delivery.ml.demo", "run_ml_demo"),
-}
+ROLES = ("router", "controller", "shadow")
 
 
-def _serve(host: str | None, port: int | None) -> int:
-    import uvicorn  # noqa: PLC0415 - only needed when serving
-
-    from progressive_model_delivery.core.app import create_app  # noqa: PLC0415
+def _build_app(role: str) -> tuple[object, object]:
+    from progressive_model_delivery.control.api import build_control_app  # noqa: PLC0415
     from progressive_model_delivery.core.config import get_settings  # noqa: PLC0415
     from progressive_model_delivery.core.logging import configure_logging  # noqa: PLC0415
-    from progressive_model_delivery.core.tracing import (  # noqa: PLC0415
-        install_global_tracer_provider,
+    from progressive_model_delivery.serving.router import build_router_app  # noqa: PLC0415
+    from progressive_model_delivery.serving.shadow_worker import (  # noqa: PLC0415
+        build_shadow_app,
     )
 
     settings = get_settings()
     configure_logging(settings.log_level, json_output=settings.log_json)
-    app = create_app(settings)
-    install_global_tracer_provider(app.state.tracer_provider)
+    builders = {
+        "router": build_router_app,
+        "controller": build_control_app,
+        "shadow": build_shadow_app,
+    }
+    return builders[role](settings), settings
+
+
+def _serve(role: str, host: str | None, port: int | None) -> int:
+    import uvicorn  # noqa: PLC0415 - only needed when serving
+
+    from progressive_model_delivery.core.tracing import (  # noqa: PLC0415
+        install_global_tracer_provider,
+    )
+
+    app, settings = _build_app(role)
+    install_global_tracer_provider(app.state.tracer_provider)  # type: ignore[attr-defined]
     uvicorn.run(
         app,
-        host=host or settings.host,
-        port=port or settings.port,
+        host=host or settings.host,  # type: ignore[attr-defined]
+        port=port or settings.port,  # type: ignore[attr-defined]
         log_config=None,
         access_log=False,
         server_header=False,
@@ -41,40 +62,99 @@ def _serve(host: str | None, port: int | None) -> int:
     return 0
 
 
-def _demo(kit: str, workdir: Path) -> int:
-    from progressive_model_delivery.core.logging import configure_logging  # noqa: PLC0415
+def _demo(workdir: Path) -> int:
+    import sys as _sys  # noqa: PLC0415
 
-    configure_logging("WARNING", json_output=True, stream=sys.stderr)
-    selected = list(_DEMOS) if kit == "all" else [kit]
-    ran = 0
-    for name in selected:
-        module_name, function_name = _DEMOS[name]
-        if importlib.util.find_spec(module_name) is None:
-            continue  # kit removed from this repo
-        function = getattr(importlib.import_module(module_name), function_name)
-        summary = function(workdir / name)
-        print(json.dumps({"demo": name, **summary}, indent=2, sort_keys=True))
-        ran += 1
-    return 0 if ran else 1
+    from progressive_model_delivery.core.logging import configure_logging  # noqa: PLC0415
+    from progressive_model_delivery.demo import run_demo  # noqa: PLC0415
+
+    configure_logging("WARNING", json_output=True, stream=_sys.stderr)
+    print(json.dumps(run_demo(workdir), indent=2, sort_keys=True))
+    return 0
+
+
+def _audit(action: str, database: Path, output: Path | None) -> int:
+    from progressive_model_delivery.control.store import ControlStore  # noqa: PLC0415
+
+    if not database.exists():
+        print(f"no control database at {database}", file=sys.stderr)
+        return 2
+    store = ControlStore(database)
+    if action == "export":
+        target = output or database.with_suffix(".audit.jsonl")
+        count = store.export_audit(target)
+        print(json.dumps({"exported": count, "path": str(target)}, indent=2))
+        return 0
+    result = store.verify_audit()
+    print(
+        json.dumps(
+            {
+                "ok": result.ok,
+                "entries": result.entries,
+                "head": result.head,
+                "error": result.error,
+                "seq": result.seq,
+            },
+            indent=2,
+        )
+    )
+    return 0 if result.ok else 1
+
+
+def _bootstrap(root: Path, key_path: Path | None) -> int:
+    from progressive_model_delivery.models.pipeline import build_demo_models  # noqa: PLC0415
+    from progressive_model_delivery.registry.signing import SigningKey  # noqa: PLC0415
+
+    key = SigningKey.generate()
+    models = build_demo_models(root, key)
+    if key_path is not None:
+        key.save(key_path)
+    print(
+        json.dumps(
+            {
+                "registry_dir": str(root / "registry"),
+                "public_key_b64": key.public().to_b64(),
+                "private_key_file": None if key_path is None else str(key_path),
+                "releases": {name: models.release_id(name) for name in sorted(models.releases)},
+            },
+            indent=2,
+        )
+    )
+    if key_path is None:
+        print("The signing key was not saved; pass --key-out to keep it.", file=sys.stderr)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="progressive-model-delivery")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    serve = sub.add_parser("serve", help="run the HTTP service")
+    serve = sub.add_parser("serve", help="run one of the services")
+    serve.add_argument("--role", choices=ROLES, default="router")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
 
     sub.add_parser("generate-api-key", help="print a new API key and its SHA-256 digest")
 
-    demo = sub.add_parser("demo", help="run the offline demos")
-    demo.add_argument("--kit", choices=["all", *sorted(_DEMOS)], default="all")
+    binding = sub.add_parser("role-binding", help="print an APP_ROLE_BINDINGS entry")
+    binding.add_argument("principal")
+    binding.add_argument("roles", help="one or more roles joined by '+' (deployer, ...)")
+
+    demo = sub.add_parser("demo", help="run the offline end-to-end demo")
     demo.add_argument("--workdir", type=Path, default=Path("var/demo"))
+
+    audit = sub.add_parser("audit", help="verify or export the audit chain")
+    audit.add_argument("action", choices=["verify", "export"])
+    audit.add_argument("--database", type=Path, default=Path("var/control.sqlite"))
+    audit.add_argument("--output", type=Path, default=None)
+
+    bootstrap = sub.add_parser("bootstrap", help="train and publish the demo releases")
+    bootstrap.add_argument("--root", type=Path, default=Path("var/models"))
+    bootstrap.add_argument("--key-out", type=Path, default=None)
 
     args = parser.parse_args(argv)
     if args.command == "serve":
-        return _serve(args.host, args.port)
+        return _serve(args.role, args.host, args.port)
     if args.command == "generate-api-key":
         from progressive_model_delivery.core.security import generate_api_key  # noqa: PLC0415
 
@@ -82,7 +162,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"api_key": raw, "api_key_sha256": digest}, indent=2))
         print("Store only api_key_sha256 in APP_API_KEY_SHA256.", file=sys.stderr)
         return 0
-    return _demo(args.kit, args.workdir)
+    if args.command == "role-binding":
+        from progressive_model_delivery.core.security import (  # noqa: PLC0415
+            generate_api_key,
+        )
+
+        raw, digest = generate_api_key()
+        print(json.dumps({"api_key": raw, "binding": f"{digest}:{args.principal}:{args.roles}"}))
+        print("Give the api_key to the principal; keep only the binding.", file=sys.stderr)
+        return 0
+    if args.command == "audit":
+        return _audit(args.action, args.database, args.output)
+    if args.command == "bootstrap":
+        return _bootstrap(args.root, args.key_out)
+    return _demo(args.workdir)
 
 
 if __name__ == "__main__":
