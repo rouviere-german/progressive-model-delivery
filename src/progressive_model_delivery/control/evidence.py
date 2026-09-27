@@ -46,6 +46,25 @@ FloatArray = npt.NDArray[np.float64]
 BoolArray = npt.NDArray[np.bool_]
 _EPS = 1e-7
 
+_JOIN_SQL = """
+    WITH p AS (
+        SELECT * FROM read_parquet($router) WHERE rollout_id = $rid AND ts <= $now
+    ),
+    l AS ({label_cte}),
+    s AS ({shadow_cte})
+    SELECT p.stage_index, p.arm, p.subgroup, p.score, p.latency_ms, p.ts,
+           l.label, s.s_score, s.s_latency, {feature_cols}
+    FROM p LEFT JOIN l USING (request_id) LEFT JOIN s USING (request_id)
+    ORDER BY p.ts, p.request_id
+"""
+"""The delayed-label join.
+
+The three placeholders are filled with fixed identifiers only: one of two constant label CTEs,
+one of two constant shadow CTEs, and the ``NUMERIC_FEATURES`` column list. Every value -- parquet
+paths, the rollout id and the maturation cutoff -- is a bound DuckDB parameter, so no caller input
+ever reaches the SQL text.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class DriftStatus:
@@ -162,17 +181,9 @@ class EvidenceReader:
                 "s_latency FROM read_parquet($shadow) WHERE rollout_id = $rid AND ts <= $now "
                 "GROUP BY request_id"
             )
-        query = f"""
-            WITH p AS (
-                SELECT * FROM read_parquet($router) WHERE rollout_id = $rid AND ts <= $now
-            ),
-            l AS ({label_cte}),
-            s AS ({shadow_cte})
-            SELECT p.stage_index, p.arm, p.subgroup, p.score, p.latency_ms, p.ts,
-                   l.label, s.s_score, s.s_latency, {feature_cols}
-            FROM p LEFT JOIN l USING (request_id) LEFT JOIN s USING (request_id)
-            ORDER BY p.ts, p.request_id
-        """  # noqa: S608 - only fixed column names are interpolated; values are bound parameters
+        query = _JOIN_SQL.format(
+            label_cte=label_cte, shadow_cte=shadow_cte, feature_cols=feature_cols
+        )
         with duckdb.connect(":memory:") as con:
             data = con.execute(query, params).fetchnumpy()
         return {key: _unmask(value) for key, value in data.items()}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 from contextlib import closing
@@ -17,6 +18,7 @@ from progressive_model_delivery.control.store import (
     ControlStore,
     LeaseLostError,
     RolloutRecord,
+    RolloutStatus,
     StageWindow,
     StaleWriteError,
 )
@@ -51,7 +53,11 @@ def store(tmp_path: Path, clock: Clock) -> ControlStore:
 
 
 def _record(
-    store: ControlStore, spec: RolloutSpec, *, challenger: str = "b" * 64, status: str = "active"
+    store: ControlStore,
+    spec: RolloutSpec,
+    *,
+    challenger: str = "b" * 64,
+    status: RolloutStatus = "active",
 ) -> RolloutRecord:
     return RolloutRecord(
         rollout_id=ControlStore.new_rollout_id(),
@@ -59,7 +65,7 @@ def _record(
         challenger=challenger,
         spec=spec,
         spec_sha256=spec.sha256(),
-        status=status,  # type: ignore[arg-type]
+        status=status,
         stage_index=0,
         stages=(StageWindow(index=0, kind=StageKind.SHADOW, weight_bp=0, started_at=1.0),),
         proposed_by="dana",
@@ -112,10 +118,14 @@ def test_an_impossible_stored_lifecycle_is_refused_on_read(store: ControlStore) 
 
 
 def test_a_failed_transaction_leaves_nothing_behind(store: ControlStore) -> None:
-    with pytest.raises(RuntimeError, match="boom"), store.transaction() as conn:
-        store.set_champion(conn, "a" * 64)
-        store.append_audit(conn, actor="x", action="y", rollout_id=None, data={})
-        raise RuntimeError("boom")
+    def write_then_fail() -> None:
+        with store.transaction() as conn:
+            store.set_champion(conn, "a" * 64)
+            store.append_audit(conn, actor="x", action="y", rollout_id=None, data={})
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        write_then_fail()
     assert store.champion() is None
     assert store.audit_entries() == []
 
@@ -156,9 +166,7 @@ def test_updates_are_compare_and_swap_on_the_revision(
         store.rollout("f" * 32)
 
 
-def test_rollout_helpers_accept_a_shared_connection(
-    store: ControlStore, spec: RolloutSpec
-) -> None:
+def test_rollout_helpers_accept_a_shared_connection(store: ControlStore, spec: RolloutSpec) -> None:
     record = _record(store, spec)
     with store.transaction() as conn:
         store.insert_rollout(conn, record)
@@ -213,12 +221,15 @@ def test_a_live_lease_cannot_be_taken_over_and_renewal_keeps_the_token(
     store: ControlStore, clock: Clock
 ) -> None:
     first = store.acquire_lease("controller", "c1", 30.0)
-    assert first is not None and first.token == 1
+    assert first is not None
+    assert first.token == 1
     assert store.acquire_lease("controller", "c2", 30.0) is None
     renewed = store.acquire_lease("controller", "c1", 30.0)
-    assert renewed is not None and renewed.token == 1
+    assert renewed is not None
+    assert renewed.token == 1
     held = store.lease_holder("controller")
-    assert held is not None and held.holder == "c1"
+    assert held is not None
+    assert held.holder == "c1"
     assert store.lease_holder("other") is None
 
 
@@ -229,7 +240,8 @@ def test_an_expired_lease_is_taken_over_with_a_new_fencing_token(
     assert first is not None
     clock.now += 11.0
     second = store.acquire_lease("controller", "c2", 10.0)
-    assert second is not None and second.token == 2
+    assert second is not None
+    assert second.token == 2
     with store.transaction() as conn:
         store.check_lease(conn, second)
         with pytest.raises(LeaseLostError, match="no longer held"):
@@ -241,7 +253,8 @@ def test_a_released_lease_is_immediately_available(store: ControlStore) -> None:
     assert lease is not None
     store.release_lease(lease)
     taken = store.acquire_lease("controller", "c2", 60.0)
-    assert taken is not None and taken.token == 2
+    assert taken is not None
+    assert taken.token == 2
     with store.transaction() as conn, pytest.raises(LeaseLostError):
         store.check_lease(conn, lease)
 
@@ -278,10 +291,11 @@ def test_the_audit_chain_links_every_entry_to_its_predecessor(store: ControlStor
     entries = store.audit_entries()
     assert [entry.seq for entry in entries] == [0, 1, 2, 3]
     assert entries[0].prev_hash == GENESIS_HASH
-    for previous, entry in zip(entries, entries[1:], strict=False):
+    for previous, entry in itertools.pairwise(entries):
         assert entry.prev_hash == previous.hash
     verified = store.verify_audit()
-    assert verified.ok and verified.entries == 4
+    assert verified.ok
+    assert verified.entries == 4
     assert verified.head == entries[-1].hash
     assert store.verify_audit(expect_head=entries[-1].hash).ok
 
@@ -339,7 +353,10 @@ def test_the_audit_log_exports_as_canonical_jsonl(store: ControlStore, tmp_path:
     assert len(lines) == 3
     parsed = [json.loads(line) for line in lines]
     assert [entry["seq"] for entry in parsed] == [0, 1, 2]
-    assert all(line == json.dumps(json.loads(line), sort_keys=True, separators=(",", ":")) for line in lines)
+    assert all(
+        line == json.dumps(json.loads(line), sort_keys=True, separators=(",", ":"))
+        for line in lines
+    )
 
 
 @given(actions=st.lists(st.sampled_from(["a", "bb", "ccc"]), min_size=0, max_size=12))
@@ -349,9 +366,7 @@ def test_appending_any_sequence_of_entries_keeps_the_chain_verifiable(
     store = ControlStore(tmp_path_factory.mktemp("chain") / "control.sqlite")
     with store.transaction() as conn:
         for index, action in enumerate(actions):
-            store.append_audit(
-                conn, actor="a", action=action, rollout_id=None, data={"i": index}
-            )
+            store.append_audit(conn, actor="a", action=action, rollout_id=None, data={"i": index})
     result = store.verify_audit()
     assert result.ok
     assert result.entries == len(actions)

@@ -34,6 +34,33 @@ FEATURES: dict[str, Any] = {
 }
 
 
+def sub(payload: object, *keys: str) -> dict[str, Any]:
+    """Walk a JSON payload down ``keys`` and assert every hop is an object.
+
+    Evidence and audit payloads are typed ``JsonValue``, so tests have to narrow before they
+    index. Doing it here keeps the assertions readable and keeps `mypy --strict` honest instead
+    of scattering ``type: ignore`` comments over the suite.
+    """
+    node = payload
+    for key in keys:
+        assert isinstance(node, dict), f"{key}: expected an object, got {type(node).__name__}"
+        assert key in node, f"missing key {key!r}"
+        node = node[key]
+    assert isinstance(node, dict), f"expected an object at {'.'.join(keys)}"
+    return dict(node)
+
+
+def number(payload: object, *keys: str) -> float:
+    """The number at ``keys`` inside a JSON payload (the last key may address a scalar)."""
+    node = sub(payload, *keys[:-1]) if len(keys) > 1 else payload
+    if keys:
+        assert isinstance(node, dict), "expected an object"
+        node = node[keys[-1]]
+    assert not isinstance(node, bool), f"expected a number at {'.'.join(keys)}, got a bool"
+    assert isinstance(node, int | float), f"expected a number at {'.'.join(keys)}, got {node!r}"
+    return float(node)
+
+
 def service_settings(tmp_path: Path, registry: DemoRegistry, **overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "environment": "test",

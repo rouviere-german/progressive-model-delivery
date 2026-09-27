@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from progressive_model_delivery.control.operations import advance, bootstrap_champion
+from progressive_model_delivery.control.operations import advance
 from progressive_model_delivery.control.rbac import (
     ControlService,
     Principal,
@@ -85,9 +85,12 @@ def test_the_role_directory_maps_key_digests_to_principals_and_roles() -> None:
     )
     assert sorted(directory.digests) == sorted([hash_api_key(key_a), hash_api_key(key_b)])
     dana = directory.authenticate(key_a)
-    assert dana is not None and dana.name == "dana" and dana.roles == {Role.DEPLOYER}
+    assert dana is not None
+    assert dana.name == "dana"
+    assert dana.roles == {Role.DEPLOYER}
     ravi = directory.authenticate(key_b)
-    assert ravi is not None and ravi.roles == {Role.RELEASE_MANAGER, Role.VIEWER}
+    assert ravi is not None
+    assert ravi.roles == {Role.RELEASE_MANAGER, Role.VIEWER}
     assert directory.authenticate("wrong-key") is None
     assert directory.authenticate(None) is None
     assert directory.authenticate("") is None
@@ -95,7 +98,8 @@ def test_the_role_directory_maps_key_digests_to_principals_and_roles() -> None:
 
 
 def test_principal_role_checks() -> None:
-    assert BOTH.has(Role.DEPLOYER) and BOTH.has(Role.RELEASE_MANAGER)
+    assert BOTH.has(Role.DEPLOYER)
+    assert BOTH.has(Role.RELEASE_MANAGER)
     assert not VIC.has(Role.DEPLOYER)
     assert VIC.has(Role.VIEWER, Role.DEPLOYER)
 
@@ -145,7 +149,7 @@ def test_a_second_bootstrap_and_a_second_rollout_are_conflicts(
 
 
 def test_an_unknown_rollout_is_a_404(
-    service: tuple[ControlService, ControlStore, DemoRegistry]
+    service: tuple[ControlService, ControlStore, DemoRegistry],
 ) -> None:
     control, _, _ = service
     with pytest.raises(AppError) as error:
@@ -162,9 +166,7 @@ def _awaiting(
     record = _start(control, registry, spec)
     for _ in range(len(spec.stages)):
         with store.transaction() as conn:
-            record = advance(
-                store, conn, record, actor="controller:c1", evidence={"tests": ["ok"]}
-            )
+            record = advance(store, conn, record, actor="controller:c1", evidence={"tests": ["ok"]})
     assert record.status == "awaiting_approval"
     return record
 
@@ -224,9 +226,7 @@ def test_an_approval_against_stale_evidence_is_refused(
     original = ControlStore.rollout
     calls = {"n": 0}
 
-    def racing(
-        self: ControlStore, rollout_id: str, conn: object | None = None
-    ) -> RolloutRecord:
+    def racing(self: ControlStore, rollout_id: str, conn: object | None = None) -> RolloutRecord:
         stored = original(self, rollout_id, conn)  # type: ignore[arg-type]
         calls["n"] += 1
         if calls["n"] == 2:  # the re-read inside the transaction sees a newer revision
@@ -301,9 +301,7 @@ def test_an_override_needs_two_distinct_release_managers(
     assert second["approvals"] == ["ravi", "rita"]
     advanced = store.rollout(record.rollout_id)
     assert advanced.stage_index == 1
-    entry = next(
-        e for e in store.audit_entries(record.rollout_id) if e.action == "stage_advanced"
-    )
+    entry = next(e for e in store.audit_entries(record.rollout_id) if e.action == "stage_advanced")
     assert entry.actor == "override:ravi+rita"
     evidence = entry.data["evidence"]
     assert isinstance(evidence, dict)
@@ -334,7 +332,8 @@ def test_an_override_expires_when_the_rollout_moves_on(
     first = control.approve_override(RAVI, str(requested["request_id"]))
     assert first["status"] == "expired"
     stored = store.approval(str(requested["request_id"]))
-    assert stored is not None and stored["status"] == "expired"
+    assert stored is not None
+    assert stored["status"] == "expired"
     with pytest.raises(AppError, match="Override is expired"):
         control.approve_override(RITA, str(requested["request_id"]))
 
@@ -391,7 +390,7 @@ def test_evidence_lookup_is_empty_when_the_controller_never_asked(
 ) -> None:
     control, _, registry = service
     record = _start(control, registry, spec)
-    assert control._latest_evidence(record.rollout_id) == {}  # noqa: SLF001
+    assert control._latest_evidence(record.rollout_id) == {}
 
 
 def test_the_audit_chain_survives_every_rbac_path(

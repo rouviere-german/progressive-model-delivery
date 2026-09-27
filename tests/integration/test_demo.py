@@ -17,6 +17,7 @@ import pytest
 
 from progressive_model_delivery import demo as demo_module
 from progressive_model_delivery.control.controller import ReconcileOutcome
+from progressive_model_delivery.control.rbac import Principal
 from progressive_model_delivery.core.errors import AppError
 from progressive_model_delivery.demo import DemoExpectationError, build_environment, run_demo
 
@@ -41,7 +42,8 @@ def test_the_subgroup_regressed_challenger_is_rolled_back_before_it_serves_anyon
     assert scenario["stages"] == ["shadow"]  # never reached a canary stage
     assert scenario["challenger_served_requests"] == 0
     crossed = scenario["harm_tests_crossed"]
-    assert isinstance(crossed, list) and crossed
+    assert isinstance(crossed, list)
+    assert crossed
     labels = {str(item["guardrail"]) for item in crossed}
     assert "worst_subgroup_error[south]" in labels
     for item in crossed:
@@ -54,8 +56,8 @@ def test_delayed_labels_really_were_delayed_and_some_were_lost(
 ) -> None:
     scenario = demo_run["rollback_scenario"]
     assert isinstance(scenario, dict)
-    accepted = int(scenario["labels_accepted"])  # type: ignore[arg-type]
-    requests = int(scenario["requests"])  # type: ignore[arg-type]
+    accepted = int(scenario["labels_accepted"])
+    requests = int(scenario["requests"])
     assert 0 < accepted < requests  # not every request ever gets a label
 
 
@@ -69,7 +71,7 @@ def test_the_better_challenger_walks_every_stage_and_waits_for_a_human(
     assert scenario["status"] == "promoted"
     assert scenario["lifecycle"] == "production"
     assert scenario["canary_weights"] == [1.0, 5.0, 25.0, 50.0]
-    assert int(scenario["challenger_served_requests"]) > 0  # type: ignore[arg-type]
+    assert int(scenario["challenger_served_requests"]) > 0
     proven = scenario["non_inferiority_crossed"]
     assert isinstance(proven, list)
     assert {str(item["guardrail"]) for item in proven} == {"error_rate", "log_loss"}
@@ -106,7 +108,7 @@ def test_the_audit_chain_records_and_verifies_the_whole_run(
     ]
     exported = Path(str(audit["path"]))
     lines = exported.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == int(audit["entries"])  # type: ignore[arg-type]
+    assert len(lines) == int(audit["entries"])
     entries = [json.loads(line) for line in lines]
     assert entries[-1]["hash"] == audit["head"]
     assert [entry["seq"] for entry in entries] == list(range(len(entries)))
@@ -145,10 +147,6 @@ def test_the_demo_fails_loudly_when_a_scenario_does_not_behave(tmp_path: Path) -
     env = build_environment(tmp_path / "unexpected", spec_name="demo")
     env.service.bootstrap(demo_module.RELEASE_MANAGER, env.release("champion"))
     with pytest.raises(DemoExpectationError, match="expected the controller to report"):
-        demo_module._expect(  # noqa: SLF001
-            ReconcileOutcome.HOLD, ReconcileOutcome.ROLLED_BACK, "scenario"
-        )
+        demo_module._expect(ReconcileOutcome.HOLD, ReconcileOutcome.ROLLED_BACK, "scenario")
     with pytest.raises(AppError):  # a viewer cannot propose
-        env.service.propose(
-            demo_module.Principal("vic", frozenset()), env.release("better"), env.spec
-        )
+        env.service.propose(Principal("vic", frozenset()), env.release("better"), env.spec)

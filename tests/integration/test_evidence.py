@@ -15,7 +15,7 @@ comparison if they are wrong:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -115,7 +115,8 @@ class Log:
         self.root = root
         self._n = 0
         frame = sample_features(pool, np.random.default_rng(seed))
-        self._pool: list[dict[str, Any]] = frame.to_dict(orient="records")
+        # to_dict types its keys as Hashable; this frame's columns are the str FEATURES.
+        self._pool = cast("list[dict[str, Any]]", frame.to_dict(orient="records"))
 
     def request(
         self,
@@ -269,7 +270,9 @@ def test_a_label_that_arrives_after_now_does_not_count_yet(
 ) -> None:
     log.request(score=0.9, ts=0.0, shadow_score=0.9, label=1, label_at=5_000.0)
     collected = _collect(log, spec, manifests, now=1_000.0)
-    assert float(collected.stages[0].error.total) == 0.0
+    error = collected.stages[0].error
+    assert isinstance(error, PairedCounts)  # the shadow stage is always paired
+    assert float(error.total) == 0.0
     assert collected.counts["stage_0"]["paired"] == 1
 
 
@@ -332,7 +335,9 @@ def test_latency_uses_every_request_not_only_the_labelled_ones(
     latency = collected.stages[0].latency["latency_slo"]
     assert isinstance(latency, PairedCounts)
     assert float(latency.n01.sum()) == 9.0
-    assert float(collected.stages[0].error.total) == 0.0
+    error = collected.stages[0].error
+    assert isinstance(error, PairedCounts)  # the shadow stage is always paired
+    assert float(error.total) == 0.0
 
 
 def test_a_canary_stage_splits_by_arm_and_counts_exposure(
@@ -379,7 +384,9 @@ def test_an_empty_log_yields_zero_evidence(
     collected = reader.collect(
         _record(spec, stage_index=0), 100.0, champion=champion, challenger=challenger
     )
-    assert float(collected.stages[0].error.total) == 0.0
+    error = collected.stages[0].error
+    assert isinstance(error, PairedCounts)  # the shadow stage is always paired
+    assert float(error.total) == 0.0
     assert collected.drift.samples == 0
     assert collected.drift.drift_ok is False
     assert collected.drift.score_psi is None
@@ -396,7 +403,9 @@ def test_the_log_survives_missing_shadow_and_label_directories(
     collected = reader.collect(
         _record(spec, stage_index=0), 1_000.0, champion=champion, challenger=challenger
     )
-    assert collected.counts["stage_0"]["paired"] == 0
+    stage = collected.counts["stage_0"]
+    assert isinstance(stage, dict)
+    assert stage["paired"] == 0
 
 
 # --- drift --------------------------------------------------------------------------------------
@@ -421,7 +430,7 @@ def test_a_shifted_feature_distribution_fails_the_drift_precondition(
     for _ in range(rows):
         log.request(score=0.5, ts=0.0, shadow_score=0.5)
     # Rewrite the buffered rows with an extreme monthly_spend so PSI explodes.
-    for row in log.router._buffer:  # noqa: SLF001 - exercising the reader, not the writer
+    for row in log.router._buffer:
         row["f_monthly_spend"] = 499.0
     collected = _collect(log, spec, manifests, now=1_000.0)
     assert collected.drift.samples == rows

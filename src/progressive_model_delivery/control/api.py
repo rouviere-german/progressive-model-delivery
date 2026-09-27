@@ -156,6 +156,20 @@ def build_control_app(
     app.state.service = service
     app.state.role_directory = directory
 
+    _register_rollout_routes(app, control=control, controller=controller, service=service)
+    _register_decision_routes(app, control=control, service=service)
+    return app
+
+
+def _register_rollout_routes(
+    app: FastAPI,
+    *,
+    control: ControlStore,
+    controller: Controller,
+    service: ControlService,
+) -> None:
+    """Bootstrap, proposal and read-only rollout views."""
+
     @app.post("/v1/champion", status_code=201)
     async def bootstrap(body: BootstrapRequest, caller: Caller) -> dict[str, str]:
         await asyncio.to_thread(service.bootstrap, caller, body.release_id)
@@ -198,6 +212,12 @@ def build_control_app(
             "evidence": report.evidence,
         }
 
+
+def _register_decision_routes(
+    app: FastAPI, *, control: ControlStore, service: ControlService
+) -> None:
+    """The role-checked decisions (approve, rollback, override) and the audit views."""
+
     @app.post("/v1/rollouts/{rollout_id}/approve")
     async def approve(rollout_id: str, caller: Caller) -> dict[str, Any]:
         record = await asyncio.to_thread(service.approve_promotion, caller, rollout_id)
@@ -229,7 +249,9 @@ def build_control_app(
     async def verify(caller: Caller) -> dict[str, Any]:
         del caller
         result = control.verify_audit()
-        return {"ok": result.ok, "entries": result.entries, "head": result.head,
-                "error": result.error}
-
-    return app
+        return {
+            "ok": result.ok,
+            "entries": result.entries,
+            "head": result.head,
+            "error": result.error,
+        }

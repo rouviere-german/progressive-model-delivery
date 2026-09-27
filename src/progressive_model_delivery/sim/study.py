@@ -97,7 +97,7 @@ def study_spec(
     stages += [
         StageSpec(
             kind=StageKind.CANARY,
-            weight_percent=weight,  # type: ignore[arg-type]
+            weight_percent=weight,
             min_samples=samples,
             min_duration_seconds=0.0,
             max_duration_seconds=1e9,
@@ -131,7 +131,11 @@ def binomial_ci(successes: int, trials: int, *, confidence: float = 0.95) -> tup
     if trials < 1 or not 0 <= successes <= trials:
         raise ValueError("0 <= successes <= trials and trials >= 1")
     alpha = 1.0 - confidence
-    lower = 0.0 if successes == 0 else float(stats.beta.ppf(alpha / 2, successes, trials - successes + 1))
+    lower = (
+        0.0
+        if successes == 0
+        else float(stats.beta.ppf(alpha / 2, successes, trials - successes + 1))
+    )
     upper = (
         1.0
         if successes == trials
@@ -205,7 +209,9 @@ class _MomentAccumulator:
     def create(cls, rollouts: int, groups: int) -> _MomentAccumulator:
         return cls(*(_zeros(rollouts, groups) for _ in range(3)))
 
-    def add(self, count: FloatArray, total: FloatArray, total_sq: FloatArray, mask: BoolArray) -> None:
+    def add(
+        self, count: FloatArray, total: FloatArray, total_sq: FloatArray, mask: BoolArray
+    ) -> None:
         keep = mask[:, None]
         self.count += count * keep
         self.total += total * keep
@@ -287,6 +293,16 @@ class _CanaryStageState:
 
 
 _StageState = _ShadowStageState | _CanaryStageState
+
+
+def _median(values: FloatArray) -> float | None:
+    """The median of a per-rollout summary, or ``None`` when no rollout ended that way."""
+    return None if values.size == 0 else round(float(np.median(values)), 2)
+
+
+def _mean(values: FloatArray) -> float | None:
+    """The mean of a per-rollout summary, or ``None`` when no rollout ended that way."""
+    return None if values.size == 0 else round(float(np.mean(values)), 2)
 
 
 # --- results ---------------------------------------------------------------------------------
@@ -373,7 +389,9 @@ class RolloutStudy:
         if not 0.0 < label_rate <= 1.0:
             raise ValueError("label_rate must be in (0, 1]")
         shares = np.asarray(subgroup_shares, dtype=np.float64)
-        if shares.shape != (len(REGIONS),) or not math.isclose(float(shares.sum()), 1.0, abs_tol=1e-9):
+        if shares.shape != (len(REGIONS),) or not math.isclose(
+            float(shares.sum()), 1.0, abs_tol=1e-9
+        ):
             raise ValueError("subgroup_shares must have one entry per subgroup and sum to 1")
         self.spec = spec
         self.scenario = scenario
@@ -412,7 +430,9 @@ class RolloutStudy:
         draws: IntArray = self._rng.multinomial(self.look_size, self.shares, size=self.rollouts)
         return draws
 
-    def _moment_draw(self, count: IntArray, mean: float, sd: float) -> tuple[FloatArray, FloatArray]:
+    def _moment_draw(
+        self, count: IntArray, mean: float, sd: float
+    ) -> tuple[FloatArray, FloatArray]:
         """Gaussian-limit draw of ``(sum, sum of squares)`` for ``count`` i.i.d. observations."""
         n = count.astype(np.float64)
         root = np.sqrt(np.maximum(n, 0.0))
@@ -422,9 +442,7 @@ class RolloutStudy:
         total_sq = n * second_mean + root * second_sd * self._rng.standard_normal(n.shape)
         return total, np.maximum(total_sq, 0.0)
 
-    def _grow_shadow(
-        self, state: _ShadowStageState, arrivals: IntArray, mask: BoolArray
-    ) -> None:
+    def _grow_shadow(self, state: _ShadowStageState, arrivals: IntArray, mask: BoolArray) -> None:
         labeled = self._rng.binomial(arrivals, self.label_rate)
         state.error.add(self._rng.multinomial(labeled, self._error_cells), mask)
         for accumulator in state.latency.values():
@@ -460,6 +478,24 @@ class RolloutStudy:
 
     # --- the loop ----------------------------------------------------------------------------
 
+    def _grow_all(
+        self,
+        states: list[_StageState],
+        stage_index: IntArray,
+        open_mask: BoolArray,
+    ) -> None:
+        """Draw one look of traffic into whichever stage each still-open rollout sits in."""
+        arrivals = self._arrivals()
+        for index, state in enumerate(states):
+            mask = open_mask & (stage_index == index)
+            if not mask.any():
+                continue
+            if isinstance(state, _ShadowStageState):
+                if self.shadow_traffic:
+                    self._grow_shadow(state, arrivals, mask)
+            else:
+                self._grow_canary(state, arrivals, mask)
+
     def run(self) -> StudyResult:
         states = [self._new_stage_state(stage) for stage in self.spec.stages]
         stage_index = np.zeros(self.rollouts, dtype=np.int64)
@@ -473,16 +509,7 @@ class RolloutStudy:
 
         for look in range(1, self.max_looks + 1):
             looks = look
-            arrivals = self._arrivals()
-            for index, state in enumerate(states):
-                mask = open_mask & (stage_index == index)
-                if not mask.any():
-                    continue
-                if isinstance(state, _ShadowStageState):
-                    if self.shadow_traffic:
-                        self._grow_shadow(state, arrivals, mask)
-                else:
-                    self._grow_canary(state, arrivals, mask)
+            self._grow_all(states, stage_index, open_mask)
             elapsed = elapsed + self.look_seconds * open_mask
 
             stages = [state.evidence() for state in states]
@@ -520,12 +547,6 @@ class RolloutStudy:
             if not open_mask.any():
                 break
 
-        def median(values: FloatArray) -> float | None:
-            return None if values.size == 0 else round(float(np.median(values)), 2)
-
-        def mean(values: FloatArray) -> float | None:
-            return None if values.size == 0 else round(float(np.mean(values)), 2)
-
         rolled = terminal == int(Decision.ROLLBACK)
         promoted = terminal == int(Decision.REQUEST_PROMOTION)
         aborted = terminal == int(Decision.ABORT)
@@ -539,8 +560,8 @@ class RolloutStudy:
             aborted=int(np.count_nonzero(aborted)),
             open_at_end=int(np.count_nonzero(open_mask)),
             breaches=breaches,
-            median_looks_to_rollback=median(decided_look[rolled].astype(np.float64)),
-            median_exposure_to_rollback=median(exposure_at_decision[rolled]),
-            mean_exposure_to_rollback=mean(exposure_at_decision[rolled]),
-            median_looks_to_promotion=median(decided_look[promoted].astype(np.float64)),
+            median_looks_to_rollback=_median(decided_look[rolled].astype(np.float64)),
+            median_exposure_to_rollback=_median(exposure_at_decision[rolled]),
+            mean_exposure_to_rollback=_mean(exposure_at_decision[rolled]),
+            median_looks_to_promotion=_median(decided_look[promoted].astype(np.float64)),
         )

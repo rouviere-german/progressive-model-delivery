@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -148,7 +148,8 @@ class TrafficSimulator:
         labels = sample_labels(frame, self._rng)
         delays = sample_label_delays(labels, self._rng, self.config.delay)
         subjects = subject_ids(count, self._rng)
-        rows = frame.to_dict(orient="records")
+        # to_dict types its keys as Hashable; the feature frame's columns are the str FEATURES.
+        rows = cast("list[Mapping[str, Any]]", frame.to_dict(orient="records"))
         bodies = [
             {"subject_id": subject, "features": self._features(row)}
             for subject, row in zip(subjects, rows, strict=True)
@@ -177,9 +178,7 @@ class TrafficSimulator:
         bodies, labels, delays = self._batch(max(count, 1))
         failures = 0
         for index in range(count):
-            response = self.client.post(
-                "/v1/predict", json=bodies[index], headers=self._headers
-            )
+            response = self.client.post("/v1/predict", json=bodies[index], headers=self._headers)
             if response.status_code != 200:
                 failures += 1
                 continue

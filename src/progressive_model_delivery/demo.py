@@ -22,7 +22,6 @@ e-values at the decision, exposure, audit head and verification).
 
 from __future__ import annotations
 
-import json
 import shutil
 import time
 from collections.abc import Callable, Iterator
@@ -159,7 +158,7 @@ def build_environment(workdir: Path, *, spec_name: str = "demo") -> DemoEnvironm
 @contextmanager
 def _serving(
     env: DemoEnvironment,
-) -> Iterator[tuple[TestClient, Callable[[], None], Callable[[], object]]]:
+) -> Iterator[tuple[TestClient, Callable[[], None], Callable[[], None]]]:
     """A router with the shadow worker behind an in-process ASGI transport."""
     shadow_app = build_shadow_app(env.settings, background=False)
     shadow_runtime = shadow_app.state.runtime
@@ -182,7 +181,10 @@ def _serving(
             router_runtime.flush()
             shadow_runtime.writer.flush()
 
-        yield client, flush, router_runtime.refresh
+        def refresh() -> None:
+            router_runtime.refresh()
+
+        yield client, flush, refresh
 
 
 def _metric(client: TestClient, name: str, *contains: str) -> float:
@@ -239,7 +241,7 @@ def _reconcile_until_decision(
                     "outcome": str(outcome),
                     "stage_index": report.stage_index,
                     "stage_samples": evidence.get("stage_samples"),
-                    "canary_weight": evidence.get("canary_weight"),
+                    "canary_weight_percent": evidence.get("canary_weight_percent"),
                 }
             )
         if outcome in _TERMINAL:
@@ -293,9 +295,7 @@ def _rollback_scenario(env: DemoEnvironment) -> dict[str, Any]:
     with _serving(env) as (client, flush, refresh):
         traffic = _traffic(env, client, flush, seed=101)
         traffic.assert_ttl_fits(env.settings.label_ttl_seconds)
-        outcome, evidence, timeline = _reconcile_until_decision(
-            env, traffic, lambda: refresh()
-        )
+        outcome, evidence, timeline = _reconcile_until_decision(env, traffic, refresh)
         served = int(_metric(client, "app_predictions_total", 'arm="challenger"'))
     _expect(outcome, ReconcileOutcome.ROLLED_BACK, "subgroup-regressed challenger")
     final = env.control.rollout(record.rollout_id)
@@ -322,9 +322,7 @@ def _promotion_scenario(env: DemoEnvironment) -> dict[str, Any]:
     with _serving(env) as (client, flush, refresh):
         traffic = _traffic(env, client, flush, seed=202)
         traffic.assert_ttl_fits(env.settings.label_ttl_seconds)
-        outcome, evidence, timeline = _reconcile_until_decision(
-            env, traffic, lambda: refresh()
-        )
+        outcome, evidence, timeline = _reconcile_until_decision(env, traffic, refresh)
         served = int(_metric(client, "app_predictions_total", 'arm="challenger"'))
     _expect(outcome, ReconcileOutcome.PROMOTION_REQUESTED, "better challenger")
     refusals: list[str] = []
@@ -383,8 +381,3 @@ def run_demo(workdir: Path) -> dict[str, Any]:
         },
         "simulated_hours": round((env.clock.now - SimulatedClock().now) / 3600.0, 2),
     }
-
-
-def main(workdir: Path) -> int:  # pragma: no cover - exercised through the CLI
-    print(json.dumps(run_demo(workdir), indent=2, sort_keys=True))
-    return 0
