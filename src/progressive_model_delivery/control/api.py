@@ -49,6 +49,32 @@ __all__ = ["build_control_app"]
 _HEX64 = r"^[0-9a-f]{64}$"
 
 
+def principal_of(request: Request) -> Principal:
+    """Authenticate the caller against ``APP_ROLE_BINDINGS`` and return its principal.
+
+    The directory lives on ``app.state`` rather than in a closure because FastAPI resolves the
+    string annotations of ``Annotated[..., Depends(...)]`` in *module* scope: an alias defined
+    inside the app factory is invisible there and the parameter silently becomes a query
+    parameter instead of a dependency (``tests/integration/test_control_api.py`` covers this).
+    """
+    directory = request.app.state.role_directory
+    principal = directory.authenticate(extract_api_key(request.headers))
+    if principal is None:
+        request.app.state.metrics.auth_failures_total.inc()
+        raise AppError(
+            401,
+            "unauthorized",
+            "A valid API key is required.",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+    if not isinstance(principal, Principal):  # pragma: no cover - directory contract
+        raise TypeError("role directory returned a non-principal")
+    return principal
+
+
+Caller = Annotated[Principal, Depends(principal_of)]
+
+
 class BootstrapRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     release_id: str = Field(pattern=_HEX64)
@@ -128,18 +154,7 @@ def build_control_app(
     )
     app.state.controller = controller
     app.state.service = service
-
-    def principal_of(request: Request) -> Principal:
-        principal = directory.authenticate(extract_api_key(request.headers))
-        if principal is None:
-            request.app.state.metrics.auth_failures_total.inc()
-            raise AppError(
-                401, "unauthorized", "A valid API key is required.",
-                headers={"WWW-Authenticate": "ApiKey"},
-            )
-        return principal
-
-    Caller = Annotated[Principal, Depends(principal_of)]
+    app.state.role_directory = directory
 
     @app.post("/v1/champion", status_code=201)
     async def bootstrap(body: BootstrapRequest, caller: Caller) -> dict[str, str]:
