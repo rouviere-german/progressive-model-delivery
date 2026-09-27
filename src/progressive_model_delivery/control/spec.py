@@ -13,6 +13,12 @@ Error control
 * Promotion: every non-inferiority test (and the optional superiority test) must reject at
   ``alpha_promotion`` (intersection-union: no correction needed), so a challenger that is
   inferior on any tested guardrail is promoted with probability at most ``alpha_promotion``.
+
+``prior_strength`` is the total mass of the beta mixing prior on the Bernoulli guardrails. It
+never affects validity (every prior yields a valid e-value) but it does decide *which* effect
+sizes the test has power against: a large strength concentrates the prior near the null and buys
+power for very small regressions at the cost of moderate ones. The default of 10 is tuned for the
+regressions this system is meant to stop (see ``docs/adr/0004-mixture-prior-strength.md``).
 """
 
 from __future__ import annotations
@@ -139,7 +145,7 @@ class RolloutSpec(BaseModel):
     alpha_rollback: float = Field(default=0.025, gt=0, lt=0.5)
     alpha_promotion: float = Field(default=0.025, gt=0, lt=0.5)
     label_window_seconds: float = Field(gt=0, le=30 * 86_400)
-    prior_strength: float = Field(default=50.0, gt=0)
+    prior_strength: float = Field(default=10.0, gt=0)
     stages: tuple[StageSpec, ...] = Field(min_length=1, max_length=8)
     guardrails: tuple[GuardrailSpec, ...] = Field(min_length=1, max_length=16)
     drift: DriftSpec = DriftSpec()

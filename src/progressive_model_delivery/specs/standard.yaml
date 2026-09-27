@@ -5,7 +5,7 @@ version: 1
 alpha_rollback: 0.025      # P(ever rolling back a challenger that is no worse) <= 0.025
 alpha_promotion: 0.025     # P(promoting a challenger that is inferior on a tested guardrail) <= 0.025
 label_window_seconds: 3600 # labels are accepted for 1 h; only matured requests enter the tests
-prior_strength: 50
+prior_strength: 10          # beta mixing-prior mass; see docs/adr/0004-mixture-prior-strength.md
 stages:
   - kind: shadow
     min_samples: 2000

@@ -1,37 +1,48 @@
-# The same policy compressed for the offline demo (simulated clock, minutes instead of hours).
+# The offline demo policy: the same guardrails as specs/standard.yaml on a compressed schedule.
+#
+# Two deliberate differences from the production policy, so `tasks.py demo` finishes in under a
+# minute of wall clock (the clock itself is simulated, see sim/traffic.py):
+#   * the sample and duration minimums are a fraction of the production ones;
+#   * the non-inferiority margins are wide (1.5x relative error, +0.10 log-loss). A 1.10x margin
+#     needs tens of thousands of labelled canary requests before it can be *proved*, which is the
+#     honest cost of a tight non-inferiority claim and is measured in bench/bench_power.py.
 name: churn-risk-demo
-version: 1
+version: 2
 alpha_rollback: 0.025
 alpha_promotion: 0.025
 label_window_seconds: 120
-prior_strength: 50
+prior_strength: 10          # beta mixing-prior mass; see docs/adr/0004-mixture-prior-strength.md
 stages:
   - kind: shadow
-    min_samples: 600
-    min_duration_seconds: 300
-    max_duration_seconds: 7200
+    min_samples: 6000
+    min_duration_seconds: 180
+    max_duration_seconds: 86400
   - kind: canary
     weight_percent: 1
-    min_samples: 10
-    min_duration_seconds: 120
+    min_samples: 5
+    min_duration_seconds: 90
+    max_duration_seconds: 86400
   - kind: canary
     weight_percent: 5
-    min_samples: 60
-    min_duration_seconds: 180
+    min_samples: 25
+    min_duration_seconds: 90
+    max_duration_seconds: 86400
   - kind: canary
     weight_percent: 25
-    min_samples: 300
-    min_duration_seconds: 300
+    min_samples: 120
+    min_duration_seconds: 90
+    max_duration_seconds: 86400
     require_non_inferiority: true
   - kind: canary
     weight_percent: 50
-    min_samples: 600
-    min_duration_seconds: 300
+    min_samples: 250
+    min_duration_seconds: 90
+    max_duration_seconds: 86400
     require_non_inferiority: true
 guardrails:
   - name: error_rate
     metric: error
-    non_inferiority_ratio: 1.10
+    non_inferiority_ratio: 1.50
   - name: worst_subgroup_error
     metric: error
     subgroups: true
@@ -40,8 +51,8 @@ guardrails:
     slo_ms: 25
   - name: log_loss
     metric: log_loss
-    non_inferiority_margin: 0.02
-    mixture_scale: 0.05
+    non_inferiority_margin: 0.10
+    mixture_scale: 0.10
 drift:
   feature_psi_threshold: 0.2
   score_psi_threshold: 0.25
