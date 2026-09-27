@@ -17,13 +17,19 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # imported lazily at runtime so that --help stays fast
+    from fastapi import FastAPI
+
+    from progressive_model_delivery.core.config import Settings
 
 __all__ = ["main"]
 
 ROLES = ("router", "controller", "shadow")
 
 
-def _build_app(role: str) -> tuple[object, object]:
+def _build_app(role: str) -> tuple[FastAPI, Settings]:
     from progressive_model_delivery.control.api import build_control_app  # noqa: PLC0415
     from progressive_model_delivery.core.config import get_settings  # noqa: PLC0415
     from progressive_model_delivery.core.logging import configure_logging  # noqa: PLC0415
@@ -50,11 +56,11 @@ def _serve(role: str, host: str | None, port: int | None) -> int:
     )
 
     app, settings = _build_app(role)
-    install_global_tracer_provider(app.state.tracer_provider)  # type: ignore[attr-defined]
+    install_global_tracer_provider(app.state.tracer_provider)
     uvicorn.run(
         app,
-        host=host or settings.host,  # type: ignore[attr-defined]
-        port=port or settings.port,  # type: ignore[attr-defined]
+        host=host or settings.host,
+        port=port or settings.port,
         log_config=None,
         access_log=False,
         server_header=False,
@@ -116,6 +122,20 @@ def _bootstrap(root: Path, key_path: Path | None) -> int:
                 "public_key_b64": key.public().to_b64(),
                 "private_key_file": None if key_path is None else str(key_path),
                 "releases": {name: models.release_id(name) for name in sorted(models.releases)},
+                "dataset_sha256": list(models.dataset_sha256),
+                # Two views of quality. `pipeline_metrics` come from the validation frame the
+                # training pipeline prepared itself (bugs included) and are what the signed
+                # manifest records; `live_metrics` score the clean holdout, which is what serving
+                # sees. They disagree exactly for the challengers with a pipeline bug -- which is
+                # why offline metrics alone cannot gate a release.
+                "pipeline_metrics": {
+                    name: dict(sorted(models.metrics[name].items()))
+                    for name in sorted(models.metrics)
+                },
+                "live_metrics": {
+                    name: dict(sorted(models.live_metrics[name].items()))
+                    for name in sorted(models.live_metrics)
+                },
             },
             indent=2,
         )

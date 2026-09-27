@@ -6,7 +6,7 @@ import json
 import runpy
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from opentelemetry import trace as otel_trace
@@ -74,9 +74,7 @@ def test_cli_serve_configures_uvicorn_safely(
     assert captured["access_log"] is False
 
 
-def test_cli_audit_verifies_and_exports(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_audit_verifies_and_exports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     database = tmp_path / "control.sqlite"
     assert cli.main(["audit", "verify", "--database", str(database)]) == 2
     assert "no control database" in capsys.readouterr().err
@@ -86,7 +84,8 @@ def test_cli_audit_verifies_and_exports(
         store.append_audit(conn, actor="ravi", action="promoted", rollout_id=None, data={"a": 1})
     assert cli.main(["audit", "verify", "--database", str(database)]) == 0
     verified = json.loads(capsys.readouterr().out)
-    assert verified["ok"] is True and verified["entries"] == 1
+    assert verified["ok"] is True
+    assert verified["entries"] == 1
 
     target = tmp_path / "audit.jsonl"
     assert cli.main(["audit", "export", "--database", str(database), "--output", str(target)]) == 0
@@ -116,6 +115,16 @@ def test_cli_bootstrap_publishes_verifiable_releases(
         "subgroup_worse",
         "feature_order_bug",
     }
+    # Both quality views are printed, so MODEL_CARD.md numbers are reproducible from one command.
+    for view in ("pipeline_metrics", "live_metrics"):
+        assert set(payload[view]) == set(payload["releases"])
+        assert payload[view]["champion"]["error_rate"] > 0.0
+    # The pipeline's own view of subgroup_worse looks fine; serving traffic tells another story.
+    assert (
+        payload["live_metrics"]["subgroup_worse"]["error_rate_south"]
+        > payload["pipeline_metrics"]["subgroup_worse"]["error_rate_south"] * 1.5
+    )
+    assert len(payload["dataset_sha256"]) == 2
     key = SigningKey.load(key_out)
     assert key.public().to_b64() == payload["public_key_b64"]
     trust = TrustStore([key.public()])
@@ -131,7 +140,10 @@ def test_cli_bootstrap_warns_when_the_key_is_not_saved(
 
     def fake_build(root: Path, key: object, **kwargs: Any) -> Any:
         class Models:
-            releases = {"champion": object()}
+            releases: ClassVar[dict[str, object]] = {"champion": object()}
+            metrics: ClassVar[dict[str, dict[str, float]]] = {"champion": {"error_rate": 0.1}}
+            live_metrics: ClassVar[dict[str, dict[str, float]]] = {"champion": {"error_rate": 0.1}}
+            dataset_sha256: ClassVar[tuple[str, ...]] = ("b" * 64,)
 
             @staticmethod
             def release_id(name: str) -> str:
@@ -139,9 +151,7 @@ def test_cli_bootstrap_warns_when_the_key_is_not_saved(
 
         return Models()
 
-    monkeypatch.setattr(
-        "progressive_model_delivery.models.pipeline.build_demo_models", fake_build
-    )
+    monkeypatch.setattr("progressive_model_delivery.models.pipeline.build_demo_models", fake_build)
     assert cli_module.main(["bootstrap", "--root", str(tmp_path / "m")]) == 0
     out = capsys.readouterr()
     assert json.loads(out.out)["private_key_file"] is None
