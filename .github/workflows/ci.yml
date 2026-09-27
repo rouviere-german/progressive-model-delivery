@@ -93,11 +93,38 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - run: uv run python bench/bench_baseline.py --check
+      - run: uv run python bench/bench_serving.py --check
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: bench-results
-          path: bench/results/latest.json
+          path: bench/results/
+          if-no-files-found: ignore
+
+  simulation:
+    # The statistical claims in the README: A/A validity under continuous monitoring, the peeking
+    # baseline, confidence-sequence coverage, detection power and exposure before rollback. These
+    # drive the shipping evaluate()/decide() code, so a change that quietly breaks the error budget
+    # fails here rather than in production. Thresholds live in bench/thresholds.json.
+    name: simulation (A/A validity, power, coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run python bench/bench_validity.py --check
+      - run: uv run python bench/bench_power.py --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulation-results
+          path: bench/results/
           if-no-files-found: ignore
 
   baseline:
@@ -232,3 +259,18 @@ jobs:
         with:
           name: sbom-cyclonedx
           path: sbom.cdx.json
+
+  compose-e2e:
+    # The only job that exercises the real topology: router and shadow worker in separate
+    # containers, the shadow worker on a network with no gateway. Asserts the shadow hop crosses
+    # the boundary, that the worker has no egress, and that killing it does not fail a single
+    # champion response. See scripts/compose_e2e.sh for the full list.
+    name: compose end-to-end (shadow isolation, rollback, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [docker]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: scripts/compose_e2e.sh

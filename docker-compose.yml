@@ -1,24 +1,165 @@
-# Local stack. Only locally built images; nothing is pulled at runtime besides the pinned bases.
+# The deployed topology, locally. Only locally built images; nothing is pulled at runtime
+# besides the pinned bases in the Dockerfile.
+#
+# Three processes and two networks:
+#
+#   client -> [edge] -> router -> [internal] -> shadow
+#                         |                       |
+#                         +-------- state --------+ (prediction log, matured labels)
+#                                     |
+#                                  controller (reads the log, writes the rollout state)
+#
+# `shadow` sits only on `internal`, which is declared `internal: true`: Compose gives that bridge
+# no gateway, so the shadow worker can reach nothing outside the stack and nothing outside the
+# stack can reach it. That is the isolation the threat model asks for -- a challenger model is
+# untrusted code as far as the customer's request is concerned. The router reaches it by service
+# name and gives up after APP_SHADOW_TIMEOUT_SECONDS.
+#
+# Run it:
+#   export APP_API_KEY_SHA256=... APP_ROLE_BINDINGS=...   # see .env.example
+#   docker compose run --rm bootstrap                     # train + publish signed releases
+#   docker compose up router shadow controller
+#
+# `bootstrap` prints the public key of the demo signing key; put it in APP_TRUSTED_SIGNING_KEYS
+# before starting the router, or it will refuse to load any model (which is the point).
+
+x-image: &image
+  build:
+    context: .
+  image: progressive-model-delivery:local
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 128
+  restart: unless-stopped
+
+x-env: &env
+  APP_ENVIRONMENT: prod
+  APP_LOG_LEVEL: INFO
+  APP_HOST: 0.0.0.0
+  APP_DATA_DIR: /var/lib/pmd
+  APP_REGISTRY_DIR: /var/lib/pmd/registry
+  APP_CONTROL_DB: /var/lib/pmd/control.sqlite
+  APP_PREDLOG_DIR: /var/lib/pmd/predlog
+  # Comma-separated SHA-256 digests; generate with
+  # `uv run progressive-model-delivery generate-api-key`.
+  APP_API_KEY_SHA256: ${APP_API_KEY_SHA256:-}
+  # Base64 Ed25519 public keys. A release signed by anything else is refused before it is loaded.
+  APP_TRUSTED_SIGNING_KEYS: ${APP_TRUSTED_SIGNING_KEYS:-}
+
 services:
-  app:
-    build:
-      context: .
-    image: progressive-model-delivery:local
+  # One-shot: train the demo champion and challengers, sign them, write the registry.
+  bootstrap:
+    <<: [*image, *hardening]
+    command: ["bootstrap", "--root", "/var/lib/pmd", "--key-out", "/var/lib/pmd/signing.key"]
+    environment:
+      <<: *env
+    volumes:
+      - state:/var/lib/pmd
+    read_only: false
+    restart: "no"
+    networks:
+      - internal
+    mem_limit: 768m
+    cpus: 2.0
+
+  router:
+    <<: [*image, *hardening]
+    command: ["serve", "--role", "router"]
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      APP_ENVIRONMENT: prod
-      APP_LOG_LEVEL: INFO
-      # Comma-separated SHA-256 digests; generate with `uv run progressive-model-delivery generate-api-key`.
-      APP_API_KEY_SHA256: ${APP_API_KEY_SHA256:-}
-    read_only: true
+      <<: *env
+      APP_SHADOW_URL: http://shadow:8000
+      APP_SHADOW_TOKEN: ${APP_SHADOW_TOKEN:?set APP_SHADOW_TOKEN (>= 16 chars)}
+      APP_SHADOW_TIMEOUT_SECONDS: "0.5"
+      APP_SHADOW_QUEUE_SIZE: "1000"
+      # Assignment and logs key on HMAC(subject_id), never the raw id.
+      APP_SUBJECT_HASH_SECRET: ${APP_SUBJECT_HASH_SECRET:?set APP_SUBJECT_HASH_SECRET (>= 16 chars)}
+    volumes:
+      - state:/var/lib/pmd
     tmpfs:
       - /tmp:size=16m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 128
-    mem_limit: 256m
+    networks:
+      - edge
+      - internal
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    mem_limit: 512m
     cpus: 1.0
-    restart: unless-stopped
+
+  # No ports, no edge network, no egress: only the router can reach it, and only inbound.
+  shadow:
+    <<: [*image, *hardening]
+    command: ["serve", "--role", "shadow"]
+    environment:
+      <<: *env
+      APP_SHADOW_TOKEN: ${APP_SHADOW_TOKEN:?set APP_SHADOW_TOKEN (>= 16 chars)}
+    volumes:
+      - state:/var/lib/pmd
+    tmpfs:
+      - /tmp:size=16m
+    networks:
+      - internal
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    mem_limit: 512m
+    cpus: 1.0
+
+  controller:
+    <<: [*image, *hardening]
+    command: ["serve", "--role", "controller"]
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      <<: *env
+      # "<sha256 of API key>:<principal>:<role>[+<role>]" entries. A deployer proposes, a release
+      # manager approves; the controller refuses a principal that holds both for one rollout.
+      APP_ROLE_BINDINGS: ${APP_ROLE_BINDINGS:-}
+      APP_CONTROLLER_ID: controller-1
+      APP_LEASE_SECONDS: "15"
+      APP_RECONCILE_INTERVAL_SECONDS: "5"
+    volumes:
+      - state:/var/lib/pmd
+    tmpfs:
+      - /tmp:size=16m
+    networks:
+      - edge
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    mem_limit: 512m
+    cpus: 1.0
+
+  # The offline end-to-end demo inside the image: two rollouts, no network, no API key.
+  # `docker compose run --rm demo`.
+  demo:
+    <<: [*image, *hardening]
+    command: ["demo", "--workdir", "/var/lib/demo/run"]
+    environment:
+      APP_ENVIRONMENT: test
+      APP_LOG_LEVEL: WARNING
+    volumes:
+      - demo:/var/lib/demo
+    read_only: false
+    restart: "no"
+    networks:
+      - internal
+    mem_limit: 768m
+    cpus: 2.0
+
+networks:
+  edge:
+  internal:
+    # No gateway: the shadow worker has no route off this bridge.
+    internal: true
+
+volumes:
+  state:
+  demo:
