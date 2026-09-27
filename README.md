@@ -129,6 +129,12 @@ so nothing has to be estimated as a nuisance:
 | error, latency > SLO | discordant pairs, `pi0 = 1/2` (sequential McNemar) | events by arm, `pi0 = w r / (w r + 1 - w)` |
 | log loss | paired mSPRT on loss differences | two-sample mSPRT, Welch variance |
 
+The canary null holds only if the arm indicator is an independent draw per observation, and the
+router draws it once per *subject* so that assignment is sticky. Evidence therefore counts subjects,
+not requests: each subject contributes its first matured observation to a stage. Scoring every
+request instead inflates the A/A false-rollback rate to about 8% at five requests per customer,
+which the validity benchmark below measures on purpose.
+
 For `H0: pi <= pi0` the e-value mixes the likelihood ratio over a Beta prior truncated above
 `pi0`. Each component is a supermartingale under every null in the composite, so the mixture is an
 e-process and Ville's inequality gives `P(exists t: E_t >= 1/alpha) <= alpha` -- for any stopping
@@ -199,10 +205,10 @@ the command is above it. `bench/thresholds.json` holds the regression gates CI e
 
 ### Validity under continuous monitoring
 
-`uv run python bench/bench_validity.py --check` (about 85 s wall)
+`uv run python bench/bench_validity.py --check` (about 2 min wall)
 
 ```
-2000 rollouts x up to 90 looks (2000 requests each) in 64.3 s
+2000 rollouts x up to 90 looks (2000 requests each) in 97.2 s
 | measurement | rate | 95% CI | budget |
 |---|---|---|---|
 | A/A false rollback (anytime-valid) | 0.0060 | [0.0031, 0.0105] | alpha_rollback = 0.025 |
@@ -210,6 +216,9 @@ the command is above it. `bench/thresholds.json` holds the regression gates CI e
 | A/A decision by the same z-test, one look | 0.0510 | - | nominal alpha = 0.05 |
 | promotion of a challenger past the margin | 0.0000 | [0.0000, 0.0018] | alpha_promotion = 0.025 |
 | rollback of a challenger past the margin | 1.0000 | - | power, not error |
+| A/A false rollback, 5 requests per subject, scored per request | 0.0830 | [0.0667, 0.1018] | alpha_rollback = 0.025 (breached) |
+| A/A false rollback, 5 requests per subject, scored per subject | 0.0090 | [0.0041, 0.0170] | alpha_rollback = 0.025 |
+  sticky assignment: the arm is drawn once per subject, so a customer's 5 requests are one observation. Scoring them as 5 inflates the rate past the budget; scoring one per subject holds the budget and costs evidence -- 0.039 of those rollouts reached promotion within 90 looks (952 were still open).
   coupling_0.5: A/A false rollback 0.0040 over 500 rollouts
   coupling_0.95: A/A false rollback 0.0060 over 500 rollouts
 
@@ -224,8 +233,17 @@ all validity measurements within thresholds
 ```
 
 Identical models, monitored at every one of up to 90 reconciliation passes: 0.6% of rollouts ever
-roll back, against a 2.5% budget. The same arrival process judged by a repeatedly-read z-test acts
-wrongly in 36.7%. The e-values are conservative -- that conservatism is what the next table costs.
+roll back **on a guardrail e-value**, against a 2.5% budget. (The label-free score-PSI guard can also
+force a rollback and carries no error guarantee; this study runs the e-value guardrails only, which
+`sim/study.py` states.) The same arrival process judged by a repeatedly-read z-test acts wrongly in
+36.7%. The e-values are conservative -- that conservatism is what the next table costs.
+
+The last two rows are about the assignment that ships. Because the arm comes from a consistent hash
+of the subject, a customer who sends five requests is *one* draw of the arm indicator: scoring all
+five as independent evidence puts the false-rollback rate at 8.3%, three times the budget. The
+evidence reader counts one observation per subject per stage, which holds the budget at 0.9% and
+costs evidence instead -- only 3.9% of those rollouts reached promotion inside 90 looks, because
+five-requests-per-customer traffic carries about a fifth of the evidence it appears to.
 
 ### Power and exposure
 

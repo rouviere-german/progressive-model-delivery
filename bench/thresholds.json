@@ -14,6 +14,8 @@
   },
   "validity": {
     "aa_false_rollback": {"rate": 0.025, "ci95_upper": 0.045},
+    "aa_sticky_per_subject": {"rate": 0.025, "ci95_upper": 0.045},
+    "aa_sticky_per_request": {"minus_rate": -0.03},
     "false_promotion": {"rate": 0.025, "ci95_upper": 0.045},
     "naive_peeking": {"minus_rate": -0.2},
     "inferior_caught": {"minus_rate": -0.95},

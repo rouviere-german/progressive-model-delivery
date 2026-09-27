@@ -20,7 +20,12 @@ from progressive_model_delivery.control.spec import Metric, StageKind
 from progressive_model_delivery.models.features import REGIONS
 from progressive_model_delivery.sim import scenarios
 from progressive_model_delivery.sim.naive import PeekingStudy
-from progressive_model_delivery.sim.study import RolloutStudy, binomial_ci, study_spec
+from progressive_model_delivery.sim.study import (
+    RolloutStudy,
+    _CanaryStageState,
+    binomial_ci,
+    study_spec,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -308,4 +313,83 @@ def test_the_peeking_study_validates_its_arguments() -> None:
     with pytest.raises(ValueError, match="alpha"):
         PeekingStudy(
             scenarios.identical(), rollouts=1, look_size=1, looks=1, weight=0.5, alpha=0.0, seed=1
+        )
+
+
+# --- sticky assignment -------------------------------------------------------------------------
+
+
+def test_sticky_assignment_makes_the_arm_split_lumpy_and_overdispersed() -> None:
+    """The mechanism behind the 8% A/A rate: five-request subjects are one arm draw, not five."""
+    arrivals = np.full((4_000, 1), 100, dtype=np.int64)
+    independent = _study(scenarios.identical(), seed=5)._assign_challenger(arrivals, 0.25)
+    sticky = RolloutStudy(
+        study_spec(),
+        scenarios.identical(),
+        rollouts=1,
+        look_size=100,
+        max_looks=1,
+        seed=5,
+        requests_per_subject=5,
+    )._assign_challenger(arrivals, 0.25)
+    # Same mean share of the traffic ...
+    assert abs(float(independent.mean()) - 25.0) < 1.0
+    assert abs(float(sticky.mean()) - 25.0) < 1.5
+    # ... but the split moves in steps of five, so its variance is inflated by about sqrt(5).
+    assert np.all(sticky % 5 == 0)
+    assert float(sticky.std()) > 1.8 * float(independent.std())
+    assert np.all(sticky <= arrivals)
+
+
+def test_aggregating_by_subject_scores_one_observation_per_subject() -> None:
+    """What the evidence reader records: n/m observations, while n requests are still exposed."""
+    spec = study_spec()
+    study = RolloutStudy(
+        spec,
+        scenarios.identical(),
+        rollouts=1,
+        look_size=1_000,
+        max_looks=1,
+        seed=11,
+        label_rate=1.0,
+        requests_per_subject=5,
+        aggregate_by_subject=True,
+    )
+    canary = spec.stages[1]
+    state = study._new_stage_state(canary)
+    assert isinstance(state, _CanaryStageState)
+    study._grow_canary(state, np.array([[1_000, 0, 0, 0]], dtype=np.int64), np.array([True]))
+    counts = state.error.counts()
+    observations = float(counts.n_champion.sum()) + float(counts.n_challenger.sum())
+    assert observations == 200.0  # 1000 requests / 5 requests per subject
+    assert float(state.exposure[0]) == 5.0 * float(counts.n_challenger.sum())
+
+
+def test_the_assignment_model_is_recorded_in_the_result() -> None:
+    result = RolloutStudy(
+        study_spec(),
+        scenarios.identical(),
+        rollouts=4,
+        look_size=500,
+        max_looks=2,
+        seed=3,
+        requests_per_subject=5,
+        aggregate_by_subject=True,
+    ).run()
+    payload = result.to_json()
+    assert payload["requests_per_subject"] == 5
+    assert payload["aggregate_by_subject"] is True
+    assert _study(scenarios.identical()).run().to_json()["requests_per_subject"] == 1
+
+
+def test_requests_per_subject_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="requests_per_subject"):
+        RolloutStudy(
+            study_spec(),
+            scenarios.identical(),
+            rollouts=2,
+            look_size=10,
+            max_looks=1,
+            seed=1,
+            requests_per_subject=0,
         )

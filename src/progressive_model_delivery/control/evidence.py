@@ -10,6 +10,16 @@ than negatives) from biasing the comparison; see
 excluded (assumed missing at random with respect to the arm). Latency statistics need no label
 and use every request.
 
+A subject contributes at most one observation to each stage, and at a canary stage at most one per
+arm: its first matured labelled request, and its first request for the label-free latency guardrail.
+The arm comes from a consistent hash of the subject (``serving/router.py``), so a repeat visitor's
+requests share one draw of the arm indicator and are not independent evidence for the canary
+e-value's null; the paired shadow comparison clusters the same way, because one customer's
+near-identical requests disagree in the same direction. Scoring per request instead inflates the A/A
+false-rollback rate from 0.6% to 8% at five requests per subject (``bench/bench_validity.py``
+measures both). Exposure and the request counts in ``counts`` stay per request: they are about
+customers reached, not about evidence.
+
 The window is enforced here rather than assumed: a label whose ``received_at`` is more than
 ``label_window_seconds`` after its request is counted in ``late_labels_ignored`` and never enters a
 test, whatever the router's ``label_ttl_seconds`` happens to be. Without that, a TTL longer than the
@@ -26,6 +36,7 @@ segment file order; duplicates are counted into the evidence instead of being si
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,8 +53,13 @@ from progressive_model_delivery.control.guardrails import (
     PairedMoments,
     StageEvidence,
 )
-from progressive_model_delivery.control.spec import Metric, RolloutSpec, StageKind
-from progressive_model_delivery.control.store import RolloutRecord
+from progressive_model_delivery.control.spec import (
+    GuardrailSpec,
+    Metric,
+    RolloutSpec,
+    StageKind,
+)
+from progressive_model_delivery.control.store import RolloutRecord, StageWindow
 from progressive_model_delivery.ml.drift import BinnedReference
 from progressive_model_delivery.models.features import NUMERIC_FEATURES, REGIONS
 from progressive_model_delivery.registry.release import ReleaseManifest
@@ -61,7 +77,7 @@ _JOIN_SQL = """
     ),
     l AS ({label_cte}),
     s AS ({shadow_cte})
-    SELECT p.stage_index, p.arm, p.subgroup, p.score, p.latency_ms, p.ts,
+    SELECT p.stage_index, p.arm, p.subgroup, p.subject_hash, p.score, p.latency_ms, p.ts,
            l.label, l.label_at, l.label_rows, s.s_score, s.s_latency, s.shadow_rows,
            {feature_cols}
     FROM p LEFT JOIN l USING (request_id) LEFT JOIN s USING (request_id)
@@ -111,6 +127,21 @@ def _unmask(column: Any) -> npt.NDArray[Any]:
     return np.asarray(column)
 
 
+def _first_per_subject(mask: BoolArray, subjects: npt.NDArray[Any]) -> BoolArray:
+    """Keep only each subject's first selected row (rows arrive in ``(ts, request_id)`` order).
+
+    ``np.unique(..., return_index=True)`` sorts stably, so the kept index is the earliest row for
+    that subject: a deterministic choice, which replay depends on.
+    """
+    selected = np.flatnonzero(mask)
+    if selected.size == 0:
+        return mask
+    _, first = np.unique(subjects[selected], return_index=True)
+    keep = np.zeros(mask.shape, dtype=np.bool_)
+    keep[selected[first]] = True
+    return keep
+
+
 def _log_loss(label: FloatArray, score: FloatArray) -> FloatArray:
     p = np.clip(score, _EPS, 1 - _EPS)
     result: FloatArray = -(label * np.log(p) + (1 - label) * np.log1p(-p))
@@ -145,6 +176,165 @@ def _paired(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Rows:
+    """The joined log as plain arrays, plus the per-request quantities every stage needs."""
+
+    stage: npt.NDArray[np.int64]
+    groups: npt.NDArray[np.int64]
+    subject: npt.NDArray[Any]
+    score: FloatArray
+    latency: FloatArray
+    s_score: FloatArray
+    s_latency: FloatArray
+    labeled: BoolArray
+    has_shadow: BoolArray
+    on_challenger: BoolArray
+    served_error: BoolArray
+    served_loss: FloatArray
+    shadow_error: BoolArray
+    shadow_loss: FloatArray
+    quality: dict[str, JsonValue]
+    """Counts that describe the join itself: late labels and duplicate rows, for the audit."""
+
+
+def _rows(
+    data: dict[str, Any],
+    spec: RolloutSpec,
+    now: float,
+    *,
+    champion: ReleaseManifest,
+    challenger: ReleaseManifest,
+) -> _Rows:
+    """Turn the joined columns into decision-ready arrays (the maturation rule lives here)."""
+    ts = np.asarray(data["ts"], dtype=np.float64)
+    label_raw = np.asarray(data["label"], dtype=np.float64)
+    # A missing arrival time sorts as "infinitely late", so it can never pass the window.
+    label_at = np.nan_to_num(
+        np.asarray(data["label_at"], dtype=np.float64), nan=np.inf, posinf=np.inf
+    )
+    arrived = ~np.isnan(label_raw)
+    in_window = label_at <= ts + spec.label_window_seconds
+    label = np.nan_to_num(label_raw)
+    score = np.asarray(data["score"], dtype=np.float64)
+    s_score = np.asarray(data["s_score"], dtype=np.float64)
+    on_challenger = np.asarray(data["arm"]).astype(str) == "challenger"
+    threshold = np.where(on_challenger, challenger.decision_threshold, champion.decision_threshold)
+    shadow_score = np.nan_to_num(s_score)
+    label_rows = np.nan_to_num(np.asarray(data["label_rows"], dtype=np.float64))
+    shadow_rows = np.nan_to_num(np.asarray(data["shadow_rows"], dtype=np.float64))
+    return _Rows(
+        stage=np.asarray(data["stage_index"], dtype=np.int64),
+        groups=np.array([REGIONS.index(str(g)) for g in data["subgroup"]], dtype=np.int64).reshape(
+            -1
+        ),
+        subject=np.asarray(data["subject_hash"]).astype(str),
+        score=score,
+        latency=np.asarray(data["latency_ms"], dtype=np.float64),
+        s_score=s_score,
+        s_latency=np.nan_to_num(np.asarray(data["s_latency"], dtype=np.float64)),
+        labeled=arrived & in_window & (ts <= now - spec.label_window_seconds),
+        has_shadow=~np.isnan(s_score),
+        on_challenger=on_challenger,
+        served_error=(score >= threshold).astype(np.float64) != label,
+        served_loss=_log_loss(label, score),
+        shadow_error=(shadow_score >= challenger.decision_threshold).astype(np.float64) != label,
+        shadow_loss=_log_loss(label, shadow_score),
+        quality={
+            # Observable poisoning attempts and configuration mistakes, in the audit evidence.
+            "late_labels_ignored": int(np.count_nonzero(arrived & ~in_window)),
+            "duplicate_label_requests": int(np.count_nonzero(label_rows > 1)),
+            "duplicate_shadow_requests": int(np.count_nonzero(shadow_rows > 1)),
+        },
+    )
+
+
+def _shadow_stage(
+    window: StageWindow, rows: _Rows, guardrails: Sequence[GuardrailSpec]
+) -> tuple[StageEvidence, dict[str, JsonValue]]:
+    """Paired evidence: both models scored the same request, so nothing was assigned."""
+    in_stage = rows.stage == window.index
+    pair = in_stage & rows.has_shadow & ~rows.on_challenger
+    # One comparison per subject: a repeat visitor's requests are one observation.
+    pair_first = _first_per_subject(pair, rows.subject)
+    labeled_pair = _first_per_subject(pair & rows.labeled, rows.subject)
+    latency: dict[str, PairedCounts | ArmCounts] = {
+        g.name: _paired(
+            rows.latency > float(g.slo_ms or 0),
+            rows.s_latency > float(g.slo_ms or 0),
+            pair_first,
+            rows.groups,
+        )
+        for g in guardrails
+    }
+    evidence = StageEvidence(
+        kind=StageKind.SHADOW,
+        weight=0.0,
+        error=_paired(rows.served_error, rows.shadow_error, labeled_pair, rows.groups),
+        latency=latency,
+        log_loss=PairedMoments(
+            _moments(rows.shadow_loss - rows.served_loss, labeled_pair, rows.groups)
+        ),
+        samples=np.asarray(float(labeled_pair.sum())),
+    )
+    return evidence, {
+        "kind": "shadow",
+        "requests": int(in_stage.sum()),
+        "paired": int(pair.sum()),
+        "paired_subjects": int(pair_first.sum()),
+        "paired_labeled": int(labeled_pair.sum()),
+    }
+
+
+def _canary_stage(
+    window: StageWindow, rows: _Rows, guardrails: Sequence[GuardrailSpec]
+) -> tuple[StageEvidence, dict[str, JsonValue]]:
+    """Two-arm evidence. The arm is drawn once per subject, so evidence counts subjects."""
+    in_stage = rows.stage == window.index
+    champion_mask = in_stage & ~rows.on_challenger
+    challenger_mask = in_stage & rows.on_challenger
+    champion_first = _first_per_subject(champion_mask, rows.subject)
+    challenger_first = _first_per_subject(challenger_mask, rows.subject)
+    lab_a = _first_per_subject(champion_mask & rows.labeled, rows.subject)
+    lab_b = _first_per_subject(challenger_mask & rows.labeled, rows.subject)
+    latency: dict[str, PairedCounts | ArmCounts] = {
+        g.name: ArmCounts(
+            _count(champion_first, rows.groups),
+            _count(champion_first & (rows.latency > float(g.slo_ms or 0)), rows.groups),
+            _count(challenger_first, rows.groups),
+            _count(challenger_first & (rows.latency > float(g.slo_ms or 0)), rows.groups),
+        )
+        for g in guardrails
+    }
+    evidence = StageEvidence(
+        kind=StageKind.CANARY,
+        weight=window.weight_bp / 10_000,
+        error=ArmCounts(
+            _count(lab_a, rows.groups),
+            _count(lab_a & rows.served_error, rows.groups),
+            _count(lab_b, rows.groups),
+            _count(lab_b & rows.served_error, rows.groups),
+        ),
+        latency=latency,
+        log_loss=ArmMoments(
+            _moments(rows.served_loss, lab_a, rows.groups),
+            _moments(rows.served_loss, lab_b, rows.groups),
+        ),
+        samples=np.asarray(float(lab_b.sum())),
+        exposure=np.asarray(float(challenger_mask.sum())),
+    )
+    return evidence, {
+        "kind": "canary",
+        "weight": window.weight_bp / 10_000,
+        "requests": int(in_stage.sum()),
+        "challenger_served": int(challenger_mask.sum()),
+        "champion_subjects": int(champion_first.sum()),
+        "challenger_subjects": int(challenger_first.sum()),
+        "labeled_champion": int(lab_a.sum()),
+        "labeled_challenger": int(lab_b.sum()),
+    }
+
+
 class EvidenceReader:
     def __init__(self, predlog_dir: Path) -> None:
         self.router_dir = predlog_dir / "router"
@@ -162,6 +352,7 @@ class EvidenceReader:
             "stage_index": np.zeros(0, dtype=np.int64),
             "arm": np.zeros(0, dtype=object),
             "subgroup": np.zeros(0, dtype=object),
+            "subject_hash": np.zeros(0, dtype=object),
             "score": np.zeros(0),
             "latency_ms": np.zeros(0),
             "ts": np.zeros(0),
@@ -220,127 +411,30 @@ class EvidenceReader:
     ) -> CollectedEvidence:
         spec = record.spec
         data = self._load(record.rollout_id, now)
-        stage = np.asarray(data["stage_index"], dtype=np.int64)
-        arm = np.asarray(data["arm"]).astype(str)
-        groups = np.array(
-            [REGIONS.index(str(g)) for g in data["subgroup"]], dtype=np.int64
-        ).reshape(-1)
-        score = np.asarray(data["score"], dtype=np.float64)
-        latency = np.asarray(data["latency_ms"], dtype=np.float64)
-        ts = np.asarray(data["ts"], dtype=np.float64)
-        label_raw = np.asarray(data["label"], dtype=np.float64)
-        s_score = np.asarray(data["s_score"], dtype=np.float64)
-        s_latency = np.asarray(data["s_latency"], dtype=np.float64)
-        # A missing arrival time sorts as "infinitely late", so it can never pass the window.
-        label_at = np.nan_to_num(
-            np.asarray(data["label_at"], dtype=np.float64), nan=np.inf, posinf=np.inf
-        )
-        arrived = ~np.isnan(label_raw)
-        in_window = label_at <= ts + spec.label_window_seconds
-        labeled = arrived & in_window & (ts <= now - spec.label_window_seconds)
-        label = np.nan_to_num(label_raw)
-        has_shadow = ~np.isnan(s_score)
-        on_challenger = arm == "challenger"
-        threshold = np.where(
-            on_challenger, challenger.decision_threshold, champion.decision_threshold
-        )
-        served_error = (score >= threshold).astype(np.float64) != label
-        served_loss = _log_loss(label, score)
-        shadow_score = np.nan_to_num(s_score)
-        shadow_error = (shadow_score >= challenger.decision_threshold).astype(np.float64) != label
-        shadow_loss = _log_loss(label, shadow_score)
-        latency_guardrails = [g for g in spec.guardrails if g.metric is Metric.LATENCY_SLO]
-
+        rows = _rows(data, spec, now, champion=champion, challenger=challenger)
+        guardrails = [g for g in spec.guardrails if g.metric is Metric.LATENCY_SLO]
         stages: list[StageEvidence] = []
-        label_rows = np.nan_to_num(np.asarray(data["label_rows"], dtype=np.float64))
-        shadow_rows = np.nan_to_num(np.asarray(data["shadow_rows"], dtype=np.float64))
-        counts: dict[str, JsonValue] = {
-            # Observable poisoning attempts and configuration mistakes, in the audit evidence.
-            "late_labels_ignored": int(np.count_nonzero(arrived & ~in_window)),
-            "duplicate_label_requests": int(np.count_nonzero(label_rows > 1)),
-            "duplicate_shadow_requests": int(np.count_nonzero(shadow_rows > 1)),
-        }
+        counts: dict[str, JsonValue] = dict(rows.quality)
         for window in record.stages:
-            in_stage = stage == window.index
             if window.kind is StageKind.SHADOW:
-                pair = in_stage & has_shadow & ~on_challenger
-                labeled_pair = pair & labeled
-                latency_counts: dict[str, PairedCounts | ArmCounts] = {
-                    g.name: _paired(
-                        latency > float(g.slo_ms or 0),
-                        np.nan_to_num(s_latency) > float(g.slo_ms or 0),
-                        pair,
-                        groups,
-                    )
-                    for g in latency_guardrails
-                }
-                evidence = StageEvidence(
-                    kind=StageKind.SHADOW,
-                    weight=0.0,
-                    error=_paired(served_error, shadow_error, labeled_pair, groups),
-                    latency=latency_counts,
-                    log_loss=PairedMoments(
-                        _moments(shadow_loss - served_loss, labeled_pair, groups)
-                    ),
-                    samples=np.asarray(float(labeled_pair.sum())),
-                )
-                counts[f"stage_{window.index}"] = {
-                    "kind": "shadow",
-                    "requests": int(in_stage.sum()),
-                    "paired": int(pair.sum()),
-                    "paired_labeled": int(labeled_pair.sum()),
-                }
+                evidence, stage_counts = _shadow_stage(window, rows, guardrails)
             else:
-                champion_mask = in_stage & ~on_challenger
-                challenger_mask = in_stage & on_challenger
-                lab_a, lab_b = champion_mask & labeled, challenger_mask & labeled
-                latency_counts = {
-                    g.name: ArmCounts(
-                        _count(champion_mask, groups),
-                        _count(champion_mask & (latency > float(g.slo_ms or 0)), groups),
-                        _count(challenger_mask, groups),
-                        _count(challenger_mask & (latency > float(g.slo_ms or 0)), groups),
-                    )
-                    for g in latency_guardrails
-                }
-                evidence = StageEvidence(
-                    kind=StageKind.CANARY,
-                    weight=window.weight_bp / 10_000,
-                    error=ArmCounts(
-                        _count(lab_a, groups),
-                        _count(lab_a & served_error, groups),
-                        _count(lab_b, groups),
-                        _count(lab_b & served_error, groups),
-                    ),
-                    latency=latency_counts,
-                    log_loss=ArmMoments(
-                        _moments(served_loss, lab_a, groups), _moments(served_loss, lab_b, groups)
-                    ),
-                    samples=np.asarray(float(lab_b.sum())),
-                    exposure=np.asarray(float(challenger_mask.sum())),
-                )
-                counts[f"stage_{window.index}"] = {
-                    "kind": "canary",
-                    "weight": window.weight_bp / 10_000,
-                    "requests": int(in_stage.sum()),
-                    "challenger_served": int(challenger_mask.sum()),
-                    "labeled_champion": int(lab_a.sum()),
-                    "labeled_challenger": int(lab_b.sum()),
-                }
+                evidence, stage_counts = _canary_stage(window, rows, guardrails)
             stages.append(evidence)
+            counts[f"stage_{window.index}"] = stage_counts
 
-        current = stage == record.current.index
+        current = rows.stage == record.current.index
         if record.current.kind is StageKind.SHADOW:
-            challenger_scores = s_score[current & has_shadow]
+            challenger_scores = rows.s_score[current & rows.has_shadow]
         else:
-            challenger_scores = score[current & on_challenger]
+            challenger_scores = rows.score[current & rows.on_challenger]
         drift = self._drift(
             spec,
             {
                 f"f_{s.name}": np.asarray(data[f"f_{s.name}"], dtype=np.float64)[current]
                 for s in NUMERIC_FEATURES
             },
-            groups[current],
+            rows.groups[current],
             challenger_scores,
             champion=champion,
             challenger=challenger,

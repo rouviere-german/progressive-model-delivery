@@ -22,7 +22,11 @@ import pandas as pd
 import pytest
 
 from progressive_model_delivery.control.evidence import EvidenceReader, _unmask
-from progressive_model_delivery.control.guardrails import ArmCounts, PairedCounts
+from progressive_model_delivery.control.guardrails import (
+    ArmCounts,
+    ArmMoments,
+    PairedCounts,
+)
 from progressive_model_delivery.control.spec import RolloutSpec, StageKind, load_spec
 from progressive_model_delivery.control.store import ControlStore, RolloutRecord, StageWindow
 from progressive_model_delivery.models.features import NUMERIC_FEATURES, REGIONS
@@ -132,6 +136,7 @@ class Log:
         shadow_latency_ms: float = 5.0,
         label: int | None = None,
         label_at: float | None = None,
+        subject_hash: str | None = None,
     ) -> str:
         self._n += 1
         request_id = f"{self._n:032x}"
@@ -146,7 +151,7 @@ class Log:
             "arm": arm,
             "weight": 0.25 if stage_index else 0.0,
             "release_id": "b" * 64 if arm == "challenger" else "a" * 64,
-            "subject_hash": f"{self._n:032x}",
+            "subject_hash": f"{self._n:032x}" if subject_hash is None else subject_hash,
             "subgroup": subgroup,
             "score": score,
             "latency_ms": latency_ms,
@@ -232,6 +237,7 @@ def test_a_request_without_a_label_is_not_an_observation(
         "kind": "shadow",
         "requests": 50,
         "paired": 50,
+        "paired_subjects": 50,
         "paired_labeled": 10,
     }
 
@@ -546,3 +552,83 @@ def test_the_controller_can_read_a_log_written_by_the_router(
         *(f"f_{s.name}" for s in NUMERIC_FEATURES),
     }
     assert "subject_id" not in written.columns
+
+
+def test_a_subject_contributes_one_observation_to_a_stage(
+    log: Log, spec: RolloutSpec, manifests: tuple[ReleaseManifest, ReleaseManifest]
+) -> None:
+    """A repeat visitor is one observation per arm, not one per request.
+
+    The canary e-value's null is ``P(event on the challenger arm) = w r / (w r + 1 - w)``, which
+    needs one independent draw of the arm indicator per observation. The router draws the arm once
+    per subject (a consistent hash of the HMAC-ed subject id -- that stickiness is the product
+    requirement), so five requests from one customer are one draw. Counting them as five
+    over-counts the evidence in the direction that matters: ``bench/bench_validity.py`` measures
+    the A/A false-rollback rate at 8% instead of 0.6% when five-request subjects are scored per
+    request. The reader therefore keeps each subject's first matured observation per stage and arm.
+    """
+    for subject in ("a" * 32, "b" * 32, "c" * 32):
+        for _ in range(5):
+            # score 0.9 against label 0: every one of these requests is an error, and slow.
+            log.request(
+                score=0.9,
+                ts=0.0,
+                stage_index=1,
+                arm="challenger",
+                label=0,
+                subject_hash=subject,
+                latency_ms=30.0,
+            )
+    for subject in ("d" * 32, "e" * 32):
+        for _ in range(4):
+            log.request(
+                score=0.9, ts=0.0, stage_index=1, arm="champion", label=1, subject_hash=subject
+            )
+    collected = _collect(log, spec, manifests, now=1_000.0, stage_index=1)
+
+    error = collected.stages[1].error
+    assert isinstance(error, ArmCounts)
+    assert float(error.n_challenger.sum()) == 3.0
+    assert float(error.k_challenger.sum()) == 3.0
+    assert float(error.n_champion.sum()) == 2.0
+    log_loss = collected.stages[1].log_loss
+    assert isinstance(log_loss, ArmMoments)
+    assert float(log_loss.challenger.count.sum()) == 3.0
+    latency = collected.stages[1].latency["latency_slo"]
+    assert isinstance(latency, ArmCounts)
+    assert float(latency.n_challenger.sum()) == 3.0
+    assert float(latency.k_challenger.sum()) == 3.0
+
+    stage = collected.counts["stage_1"]
+    assert isinstance(stage, dict)
+    # Exposure is still every request the challenger answered: customers, not observations.
+    assert stage["challenger_served"] == 15
+    assert stage["challenger_subjects"] == 3
+    assert stage["labeled_challenger"] == 3
+    assert float(collected.stages[1].exposure) == 15.0
+
+
+def test_a_subject_contributes_one_paired_observation_to_the_shadow_stage(
+    log: Log, spec: RolloutSpec, manifests: tuple[ReleaseManifest, ReleaseManifest]
+) -> None:
+    """Shadow pairs cluster by subject too: one customer's requests carry one model comparison.
+
+    Nothing is assigned in the shadow stage -- both models score every request -- but the paired
+    (sequential McNemar) e-value still needs independent discordant pairs, and a repeat visitor's
+    near-identical requests disagree in the same direction. The same rule applies.
+    """
+    for subject in ("a" * 32, "b" * 32):
+        for _ in range(6):
+            log.request(
+                score=0.9, ts=0.0, shadow_score=0.1, label=1, subject_hash=subject, subgroup="north"
+            )
+    collected = _collect(log, spec, manifests, now=1_000.0)
+    error = collected.stages[0].error
+    assert isinstance(error, PairedCounts)
+    assert float(error.total) == 2.0
+    assert float(error.n01.sum()) == 2.0
+    stage = collected.counts["stage_0"]
+    assert isinstance(stage, dict)
+    assert stage["paired"] == 12
+    assert stage["paired_subjects"] == 2
+    assert stage["paired_labeled"] == 2

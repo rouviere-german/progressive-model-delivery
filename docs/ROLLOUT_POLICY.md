@@ -43,8 +43,9 @@ made under.
 ## The two guarantees
 
 **Rollback (type-I error on harm).** For a challenger that is genuinely no worse than the champion
-on every guardrail, the probability that the controller *ever* rolls it back -- across every
-reconciliation pass, at every stage, for any stopping rule -- is at most `alpha_rollback = 0.025`.
+on every guardrail, the probability that the controller *ever* rolls it back **on a guardrail
+e-value** -- across every reconciliation pass, at every stage, for any stopping rule -- is at most
+`alpha_rollback = 0.025`.
 
 Each harm test is an e-value: a nonnegative statistic whose expectation is at most 1 under the null.
 Ville's inequality then bounds `P(exists t: E_t >= 1/alpha')` by `alpha'`, with no reference to a
@@ -52,7 +53,13 @@ sample size or a look schedule. `alpha_rollback` is split Bonferroni-style over 
 (each subgroup counting separately), so each runs at `alpha_rollback / K` and the union bound gives
 the overall budget.
 
-Measured: **0.6%** of 2,000 A/A rollouts, 95% CI [0.31%, 1.05%]
+The guardrail e-values are not the controller's only rollback trigger: the label-free score-PSI guard
+can roll a rollout back on its own and carries no error guarantee (see "The score guard trades
+precision for speed" below). The budget above does not cover it, and neither does the measurement
+below, which runs the stage rule with `drift_ok=True` and `score_breach=False`.
+
+Measured: **0.6%** of 2,000 A/A rollouts, 95% CI [0.31%, 1.05%], with one request per subject; and
+**0.9%**, 95% CI [0.41%, 1.70%], under the shipped sticky assignment at five requests per subject
 (`uv run python bench/bench_validity.py --check`).
 
 **Promotion (type-I error on inferiority).** For a challenger that is inferior on any *tested*
@@ -67,6 +74,29 @@ challenger actually served is the only evidence that answers the question being 
 Measured: **0 of 2,000** rollouts, 95% CI [0.00%, 0.18%].
 
 ## What these guarantees do not say
+
+**A customer is one observation, not one per request.** The canary tests condition on the arm
+indicator being an independent draw with known probability `w`. The router draws it once per
+*subject* (`SHA-256(salt || HMAC(subject_id)) mod 10000 < weight_bp`), which is the stickiness the
+product needs, so a customer who sends five requests is one draw. The evidence reader therefore
+counts each subject once per stage -- its first matured labelled request per arm, and its first
+request for the label-free latency guardrail -- and the shadow stage's paired comparison follows the
+same rule, because one customer's near-identical requests disagree in the same direction.
+
+Two consequences are worth stating plainly. First, ignoring this is not a rounding error: scoring
+every request of a five-request subject as its own observation puts the A/A false-rollback rate at
+about 8% against a 2.5% budget (`uv run python bench/bench_validity.py --check` measures all three
+assignment models). Second, the fix costs evidence rather than validity: with `m` requests per
+subject a stage needs about `m` times the traffic to reach its sample minimum, which is the honest
+effective sample size, and the same benchmark shows how many rollouts then fail to finish inside 90
+looks.
+
+What is *not* covered: a subject that appears in more than one stage contributes one observation to
+each, so the per-stage e-values that multiply across stages are not perfectly independent -- a
+subject-level split across the whole rollout would fix it and would throw away most of the evidence.
+With one-hour maturation windows and a 2,000,000-customer population (the demo generator), that
+overlap is rare; on traffic dominated by a small set of heavy users it is not, and nothing here
+measures it.
 
 **They are about the tested guardrails only.** A challenger that is worse in a way no guardrail
 measures -- calibration, a subgroup not in the data contract, a failure mode that shows up in a

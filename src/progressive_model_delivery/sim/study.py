@@ -10,7 +10,7 @@ statistics of every still-open rollout grow, every guardrail e-value is recomput
 over all stages, and the stage rule fires. Rollouts advance, roll back, request promotion or
 abort independently.
 
-Two modelling choices are approximations and are stated here rather than hidden:
+Four modelling choices are approximations or omissions, and are stated here rather than hidden:
 
 * Per-request log-losses are not drawn one by one. Their running ``(count, sum, sum of squares)``
   are drawn from the Gaussian limit of those accumulators, which is the same limit the
@@ -19,6 +19,35 @@ Two modelling choices are approximations and are stated here rather than hidden:
 * Labels mature within one look. Real maturation is modelled end to end by the traffic simulator
   and the ``EvidenceReader`` (see ``tests/integration/test_evidence.py``); mixing it in here would
   only rescale the horizon.
+* Only the e-value guardrails are evaluated. The study calls ``decide`` without ``drift_ok`` or
+  ``score_breach``, so it takes the defaults (``True`` and ``False``): neither the PSI precondition
+  that blocks advancement nor the label-free score guard that can force a rollback on its own is
+  exercised, and the measured false-rollback rate excludes the score guard, which has no error
+  guarantee in the first place (``docs/ROLLOUT_POLICY.md``).
+* Within a subject, outcomes are drawn independently. With ``requests_per_subject > 1`` only the
+  *arm indicator* is shared across a subject's requests (see below), so the clustering measured
+  there is a lower bound on the clustering of a real repeat visitor, whose mistakes correlate too.
+
+Canary assignment
+-----------------
+
+The canary e-value's null is ``P(bad event on the challenger arm) = w r / (w r + 1 - w)``, which
+assumes each labelled observation lands on the challenger independently with known probability
+``w``. ``requests_per_subject = 1`` (the default) is exactly that: one Bernoulli draw per request.
+
+The shipped router does not do that. ``serving/router.py`` assigns by a consistent hash of the
+subject, so every request from one subject shares one arm indicator -- that stickiness is the point,
+and it makes canary evidence clustered by subject as soon as customers come back.
+``requests_per_subject = m`` models it: arms are drawn once per subject and each subject issues
+``m`` requests, so the arm split is lumpy and the evidence given the number of events is
+overdispersed.
+
+``aggregate_by_subject`` is the other half, and it is what ``control/evidence.py`` does: count one
+observation per subject per arm and the arm indicator is independent again by construction, at the
+cost of evidence per request. ``bench/bench_validity.py`` measures all three -- one request per
+subject, five with per-request evidence, five with per-subject evidence -- because the middle one is
+the mistake and the third one is what ships. ``docs/ROLLOUT_POLICY.md`` states what the guarantee
+assumes and what is left over (a subject may still appear in more than one stage).
 """
 
 from __future__ import annotations
@@ -318,6 +347,8 @@ class StudyResult:
     promotion_requested: int
     aborted: int
     open_at_end: int
+    requests_per_subject: int = 1
+    aggregate_by_subject: bool = False
     breaches: dict[str, int] = field(default_factory=dict)
     median_looks_to_rollback: float | None = None
     median_exposure_to_rollback: float | None = None
@@ -346,6 +377,8 @@ class StudyResult:
             "rollouts": self.rollouts,
             "looks": self.looks,
             "look_size": self.look_size,
+            "requests_per_subject": self.requests_per_subject,
+            "aggregate_by_subject": self.aggregate_by_subject,
             "rolled_back": self.rolled_back,
             "rollback_rate": round(self.rollback_rate, 5),
             "rollback_rate_ci95": [round(low, 5), round(high, 5)],
@@ -368,6 +401,12 @@ class RolloutStudy:
     ``shadow_traffic=False`` models a challenger that cannot be mirrored (it has side effects),
     so every guardrail has to be proven on served canary traffic; combined with
     ``study_spec(shadow_samples=0)`` it measures the exposure a canary-only rollout costs.
+
+    ``requests_per_subject`` is the canary assignment model: 1 for one request per subject (the
+    independence the e-value's null assumes), ``m`` for subjects that issue ``m`` requests and keep
+    the arm the router's consistent hash gave them (see the module docstring).
+    ``aggregate_by_subject`` then scores one observation per subject, which is what the evidence
+    reader records; without it the study measures per-request evidence over clustered arms.
     """
 
     def __init__(
@@ -383,11 +422,15 @@ class RolloutStudy:
         subgroup_shares: Sequence[float] = REGION_SHARES,
         look_seconds: float = LOOK_SECONDS,
         shadow_traffic: bool = True,
+        requests_per_subject: int = 1,
+        aggregate_by_subject: bool = False,
     ) -> None:
         if rollouts < 1 or look_size < 1 or max_looks < 1:
             raise ValueError("rollouts, look_size and max_looks must be positive")
         if not 0.0 < label_rate <= 1.0:
             raise ValueError("label_rate must be in (0, 1]")
+        if requests_per_subject < 1:
+            raise ValueError("requests_per_subject must be at least 1")
         shares = np.asarray(subgroup_shares, dtype=np.float64)
         if shares.shape != (len(REGIONS),) or not math.isclose(
             float(shares.sum()), 1.0, abs_tol=1e-9
@@ -402,6 +445,8 @@ class RolloutStudy:
         self.shares = shares
         self.look_seconds = look_seconds
         self.shadow_traffic = shadow_traffic
+        self.requests_per_subject = requests_per_subject
+        self.aggregate_by_subject = aggregate_by_subject
         self._rng = np.random.default_rng(seed)
         self._latency_guardrails = tuple(
             g.name for g in spec.guardrails if g.metric is Metric.LATENCY_SLO
@@ -452,8 +497,33 @@ class RolloutStudy:
         )
         state.loss_diff.add(labeled.astype(np.float64), total, total_sq, mask)
 
+    def _assign_challenger(self, arrivals: IntArray, weight: float) -> IntArray:
+        """Requests on the challenger arm per (rollout, subgroup) in one look.
+
+        With ``requests_per_subject = 1`` this is the i.i.d. Bernoulli(w) assignment the canary
+        e-value's null assumes. With ``m > 1`` the arm is drawn once per subject and the subject's
+        ``m`` requests follow it, which is what the router's consistent hash does; the leftover
+        ``arrivals % m`` requests are treated as one-request subjects.
+        """
+        if self.requests_per_subject == 1:
+            single: IntArray = self._rng.binomial(arrivals, weight)
+            return single
+        per_subject = self.requests_per_subject
+        subjects = arrivals // per_subject
+        clustered: IntArray = self._rng.binomial(subjects, weight) * per_subject
+        leftover: IntArray = self._rng.binomial(arrivals - subjects * per_subject, weight)
+        return clustered + leftover
+
     def _grow_canary(self, state: _CanaryStageState, arrivals: IntArray, mask: BoolArray) -> None:
-        on_challenger = self._rng.binomial(arrivals, state.weight)
+        exposure_per_observation = 1.0
+        if self.aggregate_by_subject:
+            # One observation per subject, so the arm indicator is an independent draw again. The
+            # requests behind it still count as exposure.
+            arrivals = arrivals // self.requests_per_subject
+            on_challenger = self._rng.binomial(arrivals, state.weight)
+            exposure_per_observation = float(self.requests_per_subject)
+        else:
+            on_challenger = self._assign_challenger(arrivals, state.weight)
         on_champion = arrivals - on_challenger
         labeled_a = self._rng.binomial(on_champion, self.label_rate)
         labeled_b = self._rng.binomial(on_challenger, self.label_rate)
@@ -474,7 +544,7 @@ class RolloutStudy:
         ):
             total, total_sq = self._moment_draw(count, profile.log_loss_mean, profile.log_loss_sd)
             moments.add(count.astype(np.float64), total, total_sq, mask)
-        state.exposure += on_challenger.sum(axis=-1) * mask
+        state.exposure += on_challenger.sum(axis=-1) * exposure_per_observation * mask
 
     # --- the loop ----------------------------------------------------------------------------
 
@@ -555,6 +625,8 @@ class RolloutStudy:
             rollouts=self.rollouts,
             looks=looks,
             look_size=self.look_size,
+            requests_per_subject=self.requests_per_subject,
+            aggregate_by_subject=self.aggregate_by_subject,
             rolled_back=int(np.count_nonzero(rolled)),
             promotion_requested=int(np.count_nonzero(promoted)),
             aborted=int(np.count_nonzero(aborted)),

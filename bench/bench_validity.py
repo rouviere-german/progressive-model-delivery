@@ -16,6 +16,11 @@ Four measurements, all on the shipping ``evaluate``/``decide`` code path:
 5. **Confidence-sequence coverage.** The intervals the operator reads next to the e-values are
    time-uniform: over simulated paths, the share that ever leaves its sequence must stay at or
    below ``alpha``, checked at every step rather than at a chosen horizon.
+6. **Sticky assignment.** The router draws the canary arm once per *subject* (a consistent hash), so
+   a repeat visitor's requests are one draw, not several. The same A/A traffic is measured three
+   ways: one request per subject, five requests per subject scored per request, and five scored per
+   subject -- which is what ``control/evidence.py`` records. The middle number is what ignoring the
+   clustering costs; the third is the shipped system's rate.
 
 Usage:
   uv run python bench/bench_validity.py                  # CI size: 2000 rollouts
@@ -52,6 +57,8 @@ from bench.harness import (  # noqa: E402 - the repo root has to be importable f
 LOOK_SIZE = 2_000
 MAX_LOOKS = 90
 SEED = 20_260_927
+REQUESTS_PER_SUBJECT = 5
+"""Requests per subject in the sticky-assignment arms (a modest repeat-visit rate)."""
 
 
 def coverage(paths: int, horizon: int, *, alpha: float = 0.05, seed: int = 11) -> dict[str, Any]:
@@ -109,6 +116,29 @@ def run(rollouts: int) -> dict[str, Any]:
         max_looks=MAX_LOOKS,
         seed=SEED + 2,
     ).run()
+    # The shipped assignment: one arm draw per subject. `sticky_per_request` scores every request
+    # as if it were an independent draw (what the reader did before it aggregated by subject);
+    # `sticky_per_subject` scores one observation per subject, which is what it records now.
+    clustered = max(rollouts // 2, 250)
+    sticky_per_request = RolloutStudy(
+        spec,
+        scenarios.identical(),
+        rollouts=clustered,
+        look_size=LOOK_SIZE,
+        max_looks=MAX_LOOKS,
+        seed=SEED + 5,
+        requests_per_subject=REQUESTS_PER_SUBJECT,
+    ).run()
+    sticky_per_subject = RolloutStudy(
+        spec,
+        scenarios.identical(),
+        rollouts=clustered,
+        look_size=LOOK_SIZE,
+        max_looks=MAX_LOOKS,
+        seed=SEED + 6,
+        requests_per_subject=REQUESTS_PER_SUBJECT,
+        aggregate_by_subject=True,
+    ).run()
     # Sensitivity of the A/A claim to how correlated the two models' mistakes are.
     sensitivity = {
         f"coupling_{coupling:g}": RolloutStudy(
@@ -127,6 +157,8 @@ def run(rollouts: int) -> dict[str, Any]:
 
     low, high = aa.rollback_ci()
     promotion_low, promotion_high = inferior.promotion_ci()
+    request_low, request_high = sticky_per_request.rollback_ci()
+    subject_low, subject_high = sticky_per_subject.rollback_ci()
     return {
         "alpha_rollback": spec.alpha_rollback,
         "alpha_promotion": spec.alpha_promotion,
@@ -142,7 +174,16 @@ def run(rollouts: int) -> dict[str, Any]:
         "false_promotion_rate": round(inferior.promotion_rate, 5),
         "false_promotion_ci95": [round(promotion_low, 5), round(promotion_high, 5)],
         "inferior_rollback_rate": round(inferior.rollback_rate, 5),
+        "requests_per_subject": REQUESTS_PER_SUBJECT,
+        "sticky_per_request_rollback_rate": round(sticky_per_request.rollback_rate, 5),
+        "sticky_per_request_rollback_ci95": [round(request_low, 5), round(request_high, 5)],
+        "sticky_per_subject_rollback_rate": round(sticky_per_subject.rollback_rate, 5),
+        "sticky_per_subject_rollback_ci95": [round(subject_low, 5), round(subject_high, 5)],
+        "sticky_per_subject_promotion_rate": round(sticky_per_subject.promotion_rate, 5),
+        "sticky_per_subject_open_at_end": sticky_per_subject.open_at_end,
         "aa": aa.to_json(),
+        "sticky_per_request": sticky_per_request.to_json(),
+        "sticky_per_subject": sticky_per_subject.to_json(),
         "peeking": peeking.to_json(),
         "inferior": inferior.to_json(),
         "coupling_sensitivity": sensitivity,
@@ -160,6 +201,15 @@ def metrics(results: dict[str, Any]) -> dict[str, dict[str, float]]:
         "false_promotion": {
             "rate": float(results["false_promotion_rate"]),
             "ci95_upper": float(results["false_promotion_ci95"][1]),
+        },
+        "aa_sticky_per_subject": {
+            "rate": float(results["sticky_per_subject_rollback_rate"]),
+            "ci95_upper": float(results["sticky_per_subject_rollback_ci95"][1]),
+        },
+        # The demonstration has to keep demonstrating: per-request evidence over clustered arms
+        # must stay far above the budget, or this benchmark has stopped measuring anything.
+        "aa_sticky_per_request": {
+            "minus_rate": -float(results["sticky_per_request_rollback_rate"])
         },
         "naive_peeking": {"minus_rate": -float(results["naive_peeking_decision_rate"])},
         "inferior_caught": {"minus_rate": -float(results["inferior_rollback_rate"])},
@@ -222,7 +272,32 @@ def main(argv: list[str] | None = None) -> int:
                 "-",
                 "power, not error",
             ],
+            [
+                f"A/A false rollback, {results['requests_per_subject']} requests per subject, "
+                "scored per request",
+                f"{results['sticky_per_request_rollback_rate']:.4f}",
+                f"[{results['sticky_per_request_rollback_ci95'][0]:.4f}, "
+                f"{results['sticky_per_request_rollback_ci95'][1]:.4f}]",
+                f"alpha_rollback = {results['alpha_rollback']} (breached)",
+            ],
+            [
+                f"A/A false rollback, {results['requests_per_subject']} requests per subject, "
+                "scored per subject",
+                f"{results['sticky_per_subject_rollback_rate']:.4f}",
+                f"[{results['sticky_per_subject_rollback_ci95'][0]:.4f}, "
+                f"{results['sticky_per_subject_rollback_ci95'][1]:.4f}]",
+                f"alpha_rollback = {results['alpha_rollback']}",
+            ],
         ],
+    )
+    print(
+        f"  sticky assignment: the arm is drawn once per subject, so a customer's "
+        f"{results['requests_per_subject']} requests are one observation. Scoring them as "
+        f"{results['requests_per_subject']} inflates the rate past the budget; scoring one per "
+        "subject holds the budget and costs evidence -- "
+        f"{results['sticky_per_subject_promotion_rate']:.3f} of those rollouts reached promotion "
+        f"within {results['looks_per_rollout']} looks "
+        f"({results['sticky_per_subject_open_at_end']} were still open)."
     )
     for name, payload in results["coupling_sensitivity"].items():
         print(
