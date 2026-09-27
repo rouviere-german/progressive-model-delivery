@@ -63,9 +63,7 @@ def test_stage_weights_must_be_canary_weights_and_strictly_increase() -> None:
     with pytest.raises(ValidationError, match="canary stages need weight_percent"):
         StageSpec(kind=StageKind.CANARY, min_samples=1, min_duration_seconds=0.0)
     with pytest.raises(ValidationError, match="serves no traffic"):
-        StageSpec(
-            kind=StageKind.SHADOW, weight_percent=5, min_samples=1, min_duration_seconds=0.0
-        )
+        StageSpec(kind=StageKind.SHADOW, weight_percent=5, min_samples=1, min_duration_seconds=0.0)
     with pytest.raises(ValidationError, match="max_duration_seconds"):
         StageSpec(
             kind=StageKind.CANARY,
@@ -75,9 +73,7 @@ def test_stage_weights_must_be_canary_weights_and_strictly_increase() -> None:
             max_duration_seconds=10.0,
         )
     with pytest.raises(ValidationError):  # 10% is not one of 1/5/25/50
-        StageSpec(
-            kind=StageKind.CANARY, weight_percent=10, min_samples=1, min_duration_seconds=0.0
-        )
+        StageSpec(kind=StageKind.CANARY, weight_percent=10, min_samples=1, min_duration_seconds=0.0)
     canary = StageSpec(
         kind=StageKind.CANARY, weight_percent=25, min_samples=1, min_duration_seconds=0.0
     )
@@ -124,9 +120,7 @@ def test_guardrail_metric_and_margin_combinations_are_checked() -> None:
     with pytest.raises(ValidationError, match="defined for the error metric"):
         GuardrailSpec(name="ll", metric=Metric.LOG_LOSS, subgroups=True)
     with pytest.raises(ValidationError, match="harm-only"):
-        GuardrailSpec(
-            name="sub", metric=Metric.ERROR, subgroups=True, non_inferiority_ratio=1.1
-        )
+        GuardrailSpec(name="sub", metric=Metric.ERROR, subgroups=True, non_inferiority_ratio=1.1)
     assert GuardrailSpec(name="a", metric=Metric.ERROR).has_non_inferiority is False
     assert GuardrailSpec(
         name="a", metric=Metric.ERROR, non_inferiority_ratio=1.1
@@ -173,6 +167,4 @@ def test_load_spec_accepts_yaml_text_and_refuses_junk(tmp_path: object) -> None:
 
 def test_extra_fields_are_refused_so_typos_never_pass_silently() -> None:
     with pytest.raises(ValidationError):
-        load_spec(
-            yaml.safe_dump({**bundled_spec("demo").model_dump(mode="json"), "alpha": 0.05})
-        )
+        load_spec(yaml.safe_dump({**bundled_spec("demo").model_dump(mode="json"), "alpha": 0.05}))

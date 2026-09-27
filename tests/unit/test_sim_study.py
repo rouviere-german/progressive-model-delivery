@@ -37,7 +37,7 @@ def test_the_paired_coupling_keeps_both_marginals_for_any_dependence(
     p_a: float, p_b: float, coupling: float
 ) -> None:
     cells = scenarios.paired_cell_probabilities(p_a, p_b, coupling)
-    p00, p01, p10, p11 = cells
+    _p00, p01, p10, p11 = cells
     assert float(cells.sum()) == pytest.approx(1.0, abs=1e-12)
     assert float(np.min(cells)) >= -1e-15
     assert float(p10 + p11) == pytest.approx(p_a, abs=1e-12)  # champion marginal
@@ -82,9 +82,7 @@ def test_arm_profiles_validate_their_rates() -> None:
     with pytest.raises(ValueError, match="one rate per subgroup"):
         scenarios.ArmProfile(error=(0.1,), latency_exceed=(0.01,) * 4, log_loss_mean=0.4)
     with pytest.raises(ValueError, match="rates must be in"):
-        scenarios.ArmProfile(
-            error=(0.0,) * 4, latency_exceed=(0.01,) * 4, log_loss_mean=0.4
-        )
+        scenarios.ArmProfile(error=(0.0,) * 4, latency_exceed=(0.01,) * 4, log_loss_mean=0.4)
     with pytest.raises(ValueError, match="log_loss_mean"):
         scenarios.ArmProfile(error=(0.1,) * 4, latency_exceed=(0.01,) * 4, log_loss_mean=0.0)
 
@@ -184,9 +182,7 @@ def _study(scenario: scenarios.Scenario, **overrides: object) -> RolloutStudy:
 
 def test_every_rollout_ends_in_exactly_one_terminal_state() -> None:
     result = _study(scenarios.error_regression(5.0)).run()
-    total = (
-        result.rolled_back + result.promotion_requested + result.aborted + result.open_at_end
-    )
+    total = result.rolled_back + result.promotion_requested + result.aborted + result.open_at_end
     assert total == result.rollouts
     assert result.rolled_back == result.rollouts  # a 5pp regression is always caught
     assert result.median_looks_to_rollback is not None
@@ -217,9 +213,7 @@ def test_a_challenger_beyond_the_non_inferiority_margin_is_not_promoted() -> Non
 
 
 def test_a_subgroup_only_regression_is_caught_by_the_subgroup_guardrail() -> None:
-    result = _study(
-        scenarios.subgroup_regression("south", 8.0), rollouts=60, max_looks=60
-    ).run()
+    result = _study(scenarios.subgroup_regression("south", 8.0), rollouts=60, max_looks=60).run()
     assert result.rolled_back > 0
     assert any(label.startswith("worst_subgroup_error[south]") for label in result.breaches)
 
@@ -233,12 +227,21 @@ def test_a_latency_regression_is_caught_by_the_latency_guardrail() -> None:
 def test_without_shadow_traffic_a_regression_costs_real_exposure() -> None:
     spec = study_spec(shadow_samples=0)
     shadowed = RolloutStudy(
-        study_spec(), scenarios.error_regression(2.0), rollouts=40, look_size=2_000,
-        max_looks=40, seed=9,
+        study_spec(),
+        scenarios.error_regression(2.0),
+        rollouts=40,
+        look_size=2_000,
+        max_looks=40,
+        seed=9,
     ).run()
     canary_only = RolloutStudy(
-        spec, scenarios.error_regression(2.0), rollouts=40, look_size=2_000, max_looks=40,
-        seed=9, shadow_traffic=False,
+        spec,
+        scenarios.error_regression(2.0),
+        rollouts=40,
+        look_size=2_000,
+        max_looks=40,
+        seed=9,
+        shadow_traffic=False,
     ).run()
     assert shadowed.median_exposure_to_rollback == 0.0
     assert canary_only.rolled_back > 0
@@ -248,7 +251,7 @@ def test_without_shadow_traffic_a_regression_costs_real_exposure() -> None:
 
 def test_an_aborting_stage_is_reported() -> None:
     """A shadow stage whose sample gate cannot be met within its window aborts the rollout."""
-    from progressive_model_delivery.control.spec import RolloutSpec  # noqa: PLC0415
+    from progressive_model_delivery.control.spec import RolloutSpec
 
     spec = study_spec(shadow_samples=10_000_000)  # unreachable at this look size
     plan = spec.model_dump(mode="json")
@@ -274,9 +277,9 @@ def test_binomial_ci_brackets_the_rate() -> None:
     assert low < 0.05 < high
     assert binomial_ci(0, 100)[0] == 0.0
     assert binomial_ci(100, 100)[1] == 1.0
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="trials"):
         binomial_ci(5, 0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="successes"):
         binomial_ci(11, 10)
 
 

@@ -193,9 +193,7 @@ class ControlService:
         if record.status != "active":
             raise _conflict(f"Rollout is {record.status}.")
         request_id = uuid.uuid4().hex
-        approvals: list[JsonValue] = (
-            [principal.name] if principal.has(Role.RELEASE_MANAGER) else []
-        )
+        approvals: list[JsonValue] = [principal.name] if principal.has(Role.RELEASE_MANAGER) else []
         body: dict[str, JsonValue] = {
             "action": action,
             "reason": reason,

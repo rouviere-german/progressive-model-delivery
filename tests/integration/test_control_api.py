@@ -45,9 +45,7 @@ def api(control_env: ControlEnv) -> Iterator[TestClient]:
         control_db=fresh,
         role_bindings=[f"{hash_api_key(KEYS[name])}:{name}:{ROLES[name]}" for name in KEYS],
     )
-    app = build_control_app(
-        settings, clock=lambda: control_env.clock[0], background=False
-    )
+    app = build_control_app(settings, clock=lambda: control_env.clock[0], background=False)
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
 
@@ -181,7 +179,9 @@ guardrails:
         {"challenger": "b" * 64, "spec_yaml": "- 1\n- 2\n"},
     ],
 )
-def test_a_bad_spec_is_a_422(api: TestClient, control_env: ControlEnv, body: dict[str, Any]) -> None:
+def test_a_bad_spec_is_a_422(
+    api: TestClient, control_env: ControlEnv, body: dict[str, Any]
+) -> None:
     _bootstrap(api, control_env)
     response = api.post("/v1/rollouts", json=body, headers=_auth("dana"))
     assert response.status_code == 422
@@ -284,7 +284,8 @@ def test_an_override_takes_two_release_managers_over_the_api(
     assert unknown_action.status_code == 422
 
     first = api.post(f"/v1/overrides/{request_id}/approve", headers=_auth("ravi"))
-    assert first.status_code == 200 and first.json()["status"] == "pending"
+    assert first.status_code == 200
+    assert first.json()["status"] == "pending"
     again = api.post(f"/v1/overrides/{request_id}/approve", headers=_auth("ravi"))
     assert again.status_code == 403
     assert api.post(f"/v1/overrides/{request_id}/approve", headers=_auth("dana")).status_code == 403
@@ -310,9 +311,7 @@ def test_the_audit_chain_is_readable_and_verifiable_over_http(
     assert entries.status_code == 200
     actions = [entry["action"] for entry in entries.json()]
     assert actions == ["champion_bootstrapped", "rollout_proposed"]
-    scoped = api.get(
-        "/v1/audit", params={"rollout_id": record["rollout_id"]}, headers=_auth("vic")
-    )
+    scoped = api.get("/v1/audit", params={"rollout_id": record["rollout_id"]}, headers=_auth("vic"))
     assert [entry["action"] for entry in scoped.json()] == ["rollout_proposed"]
 
     verified = api.get("/v1/audit/verify", headers=_auth("vic"))

@@ -50,9 +50,7 @@ def _runtime(client: TestClient) -> RouterRuntime:
     return runtime
 
 
-def _simulator(
-    client: TestClient, clock: SimulatedClock, **config: object
-) -> TrafficSimulator:
+def _simulator(client: TestClient, clock: SimulatedClock, **config: object) -> TrafficSimulator:
     runtime = _runtime(client)
     values: dict[str, object] = {"seed": 3, "requests_per_tick": 40, "tick_seconds": 30.0}
     values.update(config)
@@ -79,7 +77,8 @@ def _rows(tmp_path: Path, table: str) -> list[dict[str, object]]:
 
 def test_the_simulated_clock_only_moves_forward() -> None:
     clock = SimulatedClock(start=100.0)
-    assert clock() == 100.0 and clock.now == 100.0
+    assert clock() == 100.0
+    assert clock.now == 100.0
     assert clock.advance(5.0) == 105.0
     assert clock() == 105.0
     with pytest.raises(ValueError, match="never goes backwards"):
@@ -143,9 +142,7 @@ def test_labels_arrive_late_and_are_accepted_inside_the_ttl(
     assert traffic.total.labels_accepted == second.labels_accepted
 
 
-def test_a_label_that_misses_the_ttl_is_refused(
-    router: TestClient, clock: SimulatedClock
-) -> None:
+def test_a_label_that_misses_the_ttl_is_refused(router: TestClient, clock: SimulatedClock) -> None:
     traffic = _simulator(
         router,
         clock,

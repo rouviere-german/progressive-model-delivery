@@ -15,6 +15,7 @@ The property tests state the safety properties of the decision layer directly:
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import numpy as np
 import pytest
@@ -28,6 +29,7 @@ from progressive_model_delivery.control.guardrails import (
     PairedCounts,
     PairedMoments,
     StageEvidence,
+    TestResult,
     decide,
     evaluate,
 )
@@ -116,12 +118,12 @@ def _canary_stage(
     )
 
 
-def _harm(results: list[object], label: str) -> float:
-    for result in results:  # pragma: no branch - the label always exists
-        if result.guardrail == label or result.label == label:  # type: ignore[attr-defined]
-            if result.test == "harm":  # type: ignore[attr-defined]
-                return float(result.log_e)  # type: ignore[attr-defined]
-    raise AssertionError(label)
+def _harm(results: Sequence[TestResult], label: str) -> float:
+    """The harm e-value of one guardrail (or one of its subgroups) by label."""
+    for result in results:
+        if result.test == "harm" and label in {result.guardrail, result.label}:
+            return float(result.log_e)
+    raise AssertionError(f"no harm test named {label}")
 
 
 # --- thresholds and plan ---------------------------------------------------------------------
@@ -284,7 +286,10 @@ def test_the_last_stage_requests_promotion_only_with_promotion_evidence() -> Non
     assert _decide(stage_index=last, results=results) is Decision.HOLD
     strong = evaluate(
         SPEC,
-        [_shadow_stage(), _canary_stage(k_challenger=30.0, challenger_loss=0.40, n_challenger=1500)],
+        [
+            _shadow_stage(),
+            _canary_stage(k_challenger=30.0, challenger_loss=0.40, n_challenger=1500),
+        ],
         REGIONS,
     )
     assert _decide(stage_index=last, results=strong) is Decision.REQUEST_PROMOTION
@@ -306,14 +311,15 @@ def test_awaiting_approval_holds_but_never_blocks_a_rollback() -> None:
     last = len(SPEC.stages) - 1
     strong = evaluate(
         SPEC,
-        [_shadow_stage(), _canary_stage(k_challenger=30.0, challenger_loss=0.40, n_challenger=1500)],
+        [
+            _shadow_stage(),
+            _canary_stage(k_challenger=30.0, challenger_loss=0.40, n_challenger=1500),
+        ],
         REGIONS,
     )
     assert _decide(stage_index=last, results=strong, awaiting_approval=True) is Decision.HOLD
     harmful = evaluate(SPEC, [_shadow_stage(n01=200, n10=10)], REGIONS)
-    assert (
-        _decide(stage_index=last, results=harmful, awaiting_approval=True) is Decision.ROLLBACK
-    )
+    assert _decide(stage_index=last, results=harmful, awaiting_approval=True) is Decision.ROLLBACK
 
 
 def test_the_label_free_score_guard_rolls_back_on_its_own() -> None:
@@ -329,7 +335,7 @@ def test_the_label_free_score_guard_rolls_back_on_its_own() -> None:
     drift_ok=st.booleans(),
     harmful=st.booleans(),
 )
-def test_a_crossed_harm_e_value_always_wins(
+def test_a_crossed_harm_e_value_always_wins(  # noqa: PLR0917 - one hypothesis knob each
     samples: float,
     elapsed: float,
     stage_index: int,

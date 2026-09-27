@@ -151,7 +151,11 @@ class Scenario:
     @property
     def paired_log_loss_sd(self) -> float:
         """SD of the paired loss difference under the stated correlation."""
-        a, b, rho = self.champion.log_loss_sd, self.challenger.log_loss_sd, self.log_loss_correlation
+        a, b, rho = (
+            self.champion.log_loss_sd,
+            self.challenger.log_loss_sd,
+            self.log_loss_correlation,
+        )
         return math.sqrt(max(a * a + b * b - 2.0 * rho * a * b, 1e-6))
 
     def worst_subgroup_gap(self) -> float:
@@ -243,8 +247,7 @@ def latency_regression(shift_ms: float, *, slo_ms: float = 25.0) -> Scenario:
     champion = _champion(slo_ms)
     challenger = replace(
         champion,
-        latency_exceed=(BASE_LATENCY.exceed_probability(slo_ms, shift_ms=shift_ms),)
-        * len(REGIONS),
+        latency_exceed=(BASE_LATENCY.exceed_probability(slo_ms, shift_ms=shift_ms),) * len(REGIONS),
     )
     return Scenario(f"latency_+{shift_ms:g}ms", champion, challenger, latency_coupling=0.5)
 

@@ -121,9 +121,7 @@ def test_a_rolled_back_release_cannot_be_proposed_again(
 ) -> None:
     record = _propose(store, spec)
     with store.transaction() as conn:
-        close(
-            store, conn, record, actor="dana", status="rolled_back", reason="manual", evidence={}
-        )
+        close(store, conn, record, actor="dana", status="rolled_back", reason="manual", evidence={})
     assert store.lifecycle(CHALLENGER) == RolledBack()
     with pytest.raises(OperationError, match="already rolled_back"):
         _propose(store, spec)
@@ -189,7 +187,10 @@ def test_promotion_requires_the_awaiting_approval_state_and_a_canary_stage(
     with pytest.raises(OperationError, match="awaiting approval"), store.transaction() as conn:
         promote(store, conn, record, approved_by=("ravi",), evidence={})
     forced = record.model_copy(update={"status": "awaiting_approval"})
-    with pytest.raises(IllegalTransitionError, match="not in a canary stage"), store.transaction() as conn:
+    with (
+        pytest.raises(IllegalTransitionError, match="not in a canary stage"),
+        store.transaction() as conn,
+    ):
         promote(store, conn, forced, approved_by=("ravi",), evidence={})
 
 
@@ -218,9 +219,7 @@ def test_closing_rolls_the_release_back_and_is_not_repeatable(
         close(store, conn, closed, actor="x", status="aborted", reason="r", evidence={})
 
 
-def test_close_only_accepts_terminal_failure_states(
-    store: ControlStore, spec: RolloutSpec
-) -> None:
+def test_close_only_accepts_terminal_failure_states(store: ControlStore, spec: RolloutSpec) -> None:
     record = _propose(store, spec)
     with pytest.raises(OperationError, match="rolled_back or aborted"), store.transaction() as conn:
         close(store, conn, record, actor="x", status="promoted", reason="r", evidence={})
@@ -238,7 +237,12 @@ def test_aborting_a_rollout_keeps_the_champion(store: ControlStore, spec: Rollou
     record = _propose(store, spec)
     with store.transaction() as conn:
         aborted = close(
-            store, conn, record, actor="controller:c1", status="aborted", reason="timeout",
+            store,
+            conn,
+            record,
+            actor="controller:c1",
+            status="aborted",
+            reason="timeout",
             evidence={},
         )
     assert aborted.status == "aborted"
