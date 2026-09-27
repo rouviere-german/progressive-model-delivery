@@ -37,15 +37,28 @@ def _auth(who: str) -> dict[str, str]:
     return {"X-API-Key": KEYS[who]}
 
 
+def _app(control_env: ControlEnv, db: str, **overrides: Any) -> FastAPI:
+    settings = control_env.settings(
+        control_db=control_env.tmp_path / db,
+        role_bindings=[f"{hash_api_key(KEYS[name])}:{name}:{ROLES[name]}" for name in KEYS],
+        **overrides,
+    )
+    return build_control_app(settings, clock=lambda: control_env.clock[0], background=False)
+
+
 @pytest.fixture
 def api(control_env: ControlEnv) -> Iterator[TestClient]:
-    """A control app over an *empty* control plane (no champion yet)."""
-    fresh = control_env.tmp_path / "api-control.sqlite"
-    settings = control_env.settings(
-        control_db=fresh,
-        role_bindings=[f"{hash_api_key(KEYS[name])}:{name}:{ROLES[name]}" for name in KEYS],
+    """A control app over an *empty* control plane (no champion yet).
+
+    ``label_ttl_seconds`` is set to the demo spec's maturation window on purpose: the control plane
+    refuses a spec whose window is shorter than the TTL the router accepts labels for, because such
+    a label would arrive after its cohort had already been scored as matured.
+    """
+    app = _app(
+        control_env,
+        "api-control.sqlite",
+        label_ttl_seconds=bundled_spec("demo").label_window_seconds,
     )
-    app = build_control_app(settings, clock=lambda: control_env.clock[0], background=False)
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
 
@@ -146,7 +159,8 @@ def test_a_rollout_can_be_proposed_with_inline_spec_yaml(
     yaml_spec = """
 name: inline-policy
 version: 3
-label_window_seconds: 60
+# At least the fixture's label TTL, or the control plane refuses the spec.
+label_window_seconds: 120
 stages:
   - kind: shadow
     min_samples: 10
@@ -186,6 +200,37 @@ def test_a_bad_spec_is_a_422(
     response = api.post("/v1/rollouts", json=body, headers=_auth("dana"))
     assert response.status_code == 422
     assert response.json()["error"]["code"] in {"validation_error", "invalid_spec"}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "why"),
+    [
+        ({}, "the default 1 h label TTL is longer than the demo spec's 120 s window"),
+        (
+            {"label_ttl_seconds": 120, "max_spec_alpha": 0.01},
+            "the spec's alpha is above the ceiling",
+        ),
+        (
+            {"label_ttl_seconds": 120, "required_guardrails": ["calibration"]},
+            "a required guardrail is missing from the spec",
+        ),
+    ],
+)
+def test_a_spec_that_breaches_a_configured_policy_floor_is_refused(
+    control_env: ControlEnv, overrides: dict[str, Any], why: str
+) -> None:
+    """A deployer may propose any spec; the control plane still enforces the operator's floors."""
+    app = _app(control_env, f"floors-{abs(hash(why))}.sqlite", **overrides)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _bootstrap(client, control_env)
+        response = client.post(
+            "/v1/rollouts",
+            json={"challenger": control_env.release("better"), "spec": "demo"},
+            headers=_auth("dana"),
+        )
+        assert response.status_code == 422, why
+        assert response.json()["error"]["code"] == "spec_refused", why
+        assert client.get("/v1/rollouts", headers=_auth("vic")).json() == []
 
 
 def test_an_unknown_release_is_refused_with_a_stable_code(

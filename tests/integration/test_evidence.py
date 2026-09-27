@@ -276,6 +276,29 @@ def test_a_label_that_arrives_after_now_does_not_count_yet(
     assert collected.counts["stage_0"]["paired"] == 1
 
 
+def test_a_label_that_arrived_after_its_window_never_counts(
+    log: Log, spec: RolloutSpec, manifests: tuple[ReleaseManifest, ReleaseManifest]
+) -> None:
+    """A label the router should have refused must not fold into an already-matured cohort.
+
+    ``/v1/feedback`` accepts a label only inside ``APP_LABEL_TTL_SECONDS``, and the control plane
+    refuses a spec whose ``label_window_seconds`` is shorter than that TTL -- but the reader is the
+    component whose output the e-processes consume, so it enforces the invariant itself: a label
+    that arrived more than ``label_window_seconds`` after its request is not evidence, at any
+    ``now``. Otherwise a cohort scored as matured at ``now`` gains observations later, and the
+    anytime-valid argument (increments over disjoint, already-published cohorts) breaks.
+    """
+    log.request(score=0.9, ts=0.0, shadow_score=0.9, label=1, label_at=5_000.0)
+    log.request(score=0.9, ts=0.0, shadow_score=0.9, label=1, label_at=50.0)
+    for now in (200.0, 1_000.0, 6_000.0, 10_000.0):
+        collected = _collect(log, spec, manifests, now=now)
+        error = collected.stages[0].error
+        assert isinstance(error, PairedCounts)
+        assert float(error.total) == (1.0 if now >= 150.0 else 0.0), now
+        assert collected.counts["stage_0"]["paired"] == 2
+    assert collected.counts["late_labels_ignored"] == 1
+
+
 def test_a_duplicate_label_row_in_another_segment_is_collapsed(
     log: Log, spec: RolloutSpec, manifests: tuple[ReleaseManifest, ReleaseManifest]
 ) -> None:
@@ -285,6 +308,52 @@ def test_a_duplicate_label_row_in_another_segment_is_collapsed(
     log.labels.append({"request_id": request_id, "label": 1, "received_at": 2.0})
     collected = _collect(log, spec, manifests, now=1_000.0)
     assert float(collected.stages[0].error.total) == 1.0
+    assert collected.counts["duplicate_label_requests"] == 1
+
+
+def test_conflicting_duplicate_rows_collapse_deterministically_and_are_counted(
+    log: Log, spec: RolloutSpec, manifests: tuple[ReleaseManifest, ReleaseManifest]
+) -> None:
+    """Which duplicate wins may not depend on DuckDB's plan or on segment file order.
+
+    Replay is a claimed property (``control/controller.py``), so every per-request aggregate in the
+    join is order-independent: the smallest label, the earliest arrival, the smallest shadow score
+    and latency. A disagreement is a poisoning attempt or a writer bug, so it is also counted into
+    the evidence rather than quietly collapsed.
+    """
+    request_id = log.request(score=0.9, ts=0.0, shadow_score=0.9, label=1, subgroup="north")
+    log.flush()
+    log.labels.append({"request_id": request_id, "label": 0, "received_at": 3.0})
+    sampled = sample_features(1, np.random.default_rng(5)).to_dict(orient="records")[0]
+    log.shadow.append(
+        {
+            "request_id": request_id,
+            "rollout_id": ROLLOUT_ID,
+            "ts": 0.0,
+            "stage_index": 0,
+            "arm": "shadow",
+            "weight": 0.0,
+            "release_id": "b" * 64,
+            "subject_hash": "0" * 32,
+            "subgroup": "north",
+            "score": 0.1,
+            "latency_ms": 99.0,
+            **{f"f_{s.name}": float(sampled[s.name]) for s in NUMERIC_FEATURES},
+        }
+    )
+    results = [_collect(log, spec, manifests, now=1_000.0) for _ in range(5)]
+    for collected in results:
+        error = collected.stages[0].error
+        assert isinstance(error, PairedCounts)
+        # label 0 wins (the smaller), so the champion's 0.9 is wrong and the shadow's 0.1 is right.
+        assert float(error.n01.sum()) == 0.0
+        assert float(error.n10.sum()) == 1.0
+        assert collected.counts["duplicate_label_requests"] == 1
+        assert collected.counts["duplicate_shadow_requests"] == 1
+        latency = collected.stages[0].latency["latency_slo"]
+        assert isinstance(latency, PairedCounts)
+        # min(latency_ms) = 5 ms for the shadow row, so neither arm exceeds the 20 ms SLO.
+        assert float(latency.n00.sum()) == 1.0
 
 
 # --- what the paired and two-arm tables contain --------------------------------------------------

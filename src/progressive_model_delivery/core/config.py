@@ -18,6 +18,8 @@ __all__ = ["Settings", "get_settings"]
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _ORIGIN = re.compile(r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$")
+# Same shape as control.spec.GuardrailSpec.name.
+_GUARDRAIL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _ROLE_BINDING = re.compile(
     r"^[0-9a-f]{64}:[a-z][a-z0-9_.-]{0,31}:(deployer|release_manager|viewer)"
     r"(\+(deployer|release_manager|viewer))*$"
@@ -94,6 +96,10 @@ class Settings(BaseSettings):
     # --- controller and control API ---
     # Comma-separated "<sha256 of API key>:<principal>:<role>[+<role>]" entries.
     role_bindings: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Floors under any proposed rollout spec (see control.rbac.PolicyLimits). A spec may
+    # ask for a tighter error budget than max_spec_alpha, never a looser one.
+    max_spec_alpha: float = Field(default=0.05, gt=0, lt=0.5)
+    required_guardrails: Annotated[list[str], NoDecode] = Field(default_factory=list)
     controller_id: str = Field(default="controller-1", pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     lease_seconds: float = Field(default=15.0, gt=0)
     reconcile_interval_seconds: float = Field(default=5.0, gt=0)
@@ -111,7 +117,15 @@ class Settings(BaseSettings):
                 raise ValueError("api_key_sha256 entries must be lowercase hex SHA-256 digests")
         return value
 
-    @field_validator("trusted_signing_keys", "role_bindings", mode="before")
+    @field_validator("required_guardrails")
+    @classmethod
+    def _check_guardrail_names(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if not _GUARDRAIL_NAME.fullmatch(name):
+                raise ValueError("required_guardrails entries must be guardrail names")
+        return value
+
+    @field_validator("trusted_signing_keys", "role_bindings", "required_guardrails", mode="before")
     @classmethod
     def _parse_lists(cls, value: object) -> object:
         return _split_csv(value)

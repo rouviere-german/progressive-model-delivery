@@ -15,6 +15,12 @@ GET     /v1/audit, /v1/audit/verify            any role
 ======  =====================================  ==========================================
 
 ``/readyz`` reports ready only while this controller holds the lease.
+
+A deployer may propose an arbitrary ``spec_yaml``, so the app puts the operator's floors under it
+(:class:`~progressive_model_delivery.control.rbac.PolicyLimits`): the widest error budget
+(``APP_MAX_SPEC_ALPHA``), the guardrails every rollout must carry (``APP_REQUIRED_GUARDRAILS``) and
+a maturation window at least as long as the router's ``APP_LABEL_TTL_SECONDS``. A spec that
+breaches one is a 422 ``spec_refused``.
 """
 
 from __future__ import annotations
@@ -33,7 +39,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from progressive_model_delivery.control.controller import Controller
 from progressive_model_delivery.control.evidence import EvidenceReader
-from progressive_model_delivery.control.rbac import ControlService, Principal, RoleDirectory
+from progressive_model_delivery.control.rbac import (
+    ControlService,
+    PolicyLimits,
+    Principal,
+    RoleDirectory,
+)
 from progressive_model_delivery.control.spec import MAX_SPEC_BYTES, bundled_spec, load_spec
 from progressive_model_delivery.control.store import ControlStore
 from progressive_model_delivery.core.app import create_app
@@ -120,7 +131,19 @@ def build_control_app(
         lease_seconds=settings.lease_seconds,
         metrics=RolloutMetrics.create(reg),
     )
-    service = ControlService(control, releases, trust)
+    service = ControlService(
+        control,
+        releases,
+        trust,
+        limits=PolicyLimits(
+            max_alpha_rollback=settings.max_spec_alpha,
+            max_alpha_promotion=settings.max_spec_alpha,
+            required_guardrails=tuple(settings.required_guardrails),
+            # The router accepts labels for this long, so a shorter maturation window
+            # would let a late label land in a cohort that was already scored.
+            min_label_window_seconds=settings.label_ttl_seconds,
+        ),
+    )
     stop = threading.Event()
 
     @asynccontextmanager

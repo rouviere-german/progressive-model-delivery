@@ -54,3 +54,12 @@ def test_get_settings_is_cached() -> None:
         assert get_settings() is get_settings()
     finally:
         get_settings.cache_clear()
+
+
+def test_required_guardrails_are_parsed_as_names() -> None:
+    settings = Settings(_env_file=None, required_guardrails="error_rate, worst_subgroup_error")
+    assert settings.required_guardrails == ["error_rate", "worst_subgroup_error"]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, required_guardrails="Error Rate")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_spec_alpha=0.6)

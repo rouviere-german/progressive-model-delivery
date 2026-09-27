@@ -27,6 +27,14 @@ Error budget: `alpha_rollback = 0.025`, `alpha_promotion = 0.025`. Labels are ac
 (`label_window_seconds`); only requests whose window has closed enter the tests. Drift
 preconditions: feature PSI <= 0.2, score PSI <= 0.25, from 500 samples.
 
+The window and the router's `APP_LABEL_TTL_SECONDS` are one rule, not two knobs: the router may
+not accept a label for longer than the spec matures one. The control plane refuses a spec that
+breaks it (422 `spec_refused`), and the evidence reader drops a label that arrived more than
+`label_window_seconds` after its request in any case, counting it in `late_labels_ignored`.
+Without that, a late label would join a cohort the controller had already scored as matured --
+the outcome-correlated bias the window exists to remove, and an e-process gaining increments
+for a closed cohort.
+
 `prior_strength = 10` and each guardrail's `mixture_scale` decide which effect sizes the tests have
 power against; see `docs/adr/0004-mixture-prior-strength.md`. The spec is versioned and its SHA-256
 is written into every audit entry, so a decision can always be re-derived from the policy it was
@@ -111,3 +119,11 @@ Edit the YAML, bump `version`, and the new hash appears in every audit entry wri
 Loosening `alpha_rollback` or dropping a guardrail is a policy change with a paper trail, which is
 the point. Two things are *not* policy knobs: the controller always allows automatic rollback, and
 final promotion always needs a second human.
+
+The paper trail is one person's, though: a deployer may `POST /v1/rollouts` with an arbitrary
+`spec_yaml`, and the two-person rule covers overrides and promotion, not the policy the rollout is
+judged against. What an operator can pin down instead of trusting review is a set of floors the
+control plane enforces at proposal time: `APP_MAX_SPEC_ALPHA` (the loosest error budget it will
+accept, 0.05 in `.env.example`), `APP_REQUIRED_GUARDRAILS` (names every spec must carry) and the
+label-window rule above. A spec that breaches one never opens a rollout; within them, proposing a
+weak-but-legal policy is still a review question, and `docs/THREAT_MODEL.md` (T3) says so.

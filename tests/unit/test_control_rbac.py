@@ -21,6 +21,7 @@ import pytest
 from progressive_model_delivery.control.operations import advance
 from progressive_model_delivery.control.rbac import (
     ControlService,
+    PolicyLimits,
     Principal,
     Role,
     RoleDirectory,
@@ -414,3 +415,47 @@ def test_the_audit_chain_survives_every_rbac_path(
         "override_executed",
         "rolled_back",
     ]
+
+
+# --- policy floors ----------------------------------------------------------------------------
+
+
+def test_the_bundled_specs_clear_the_shipped_policy_floors() -> None:
+    """The floors in ``.env.example`` and ``docker-compose.yml`` accept the policies we ship."""
+    limits = PolicyLimits(
+        max_alpha_rollback=0.05,
+        max_alpha_promotion=0.05,
+        required_guardrails=("error_rate", "worst_subgroup_error", "latency_slo", "log_loss"),
+        min_label_window_seconds=120.0,
+    )
+    for name in ("standard", "demo"):
+        assert limits.refusal(bundled_spec(name)) is None, name
+
+
+@pytest.mark.parametrize(
+    ("limits", "expected"),
+    [
+        (PolicyLimits(max_alpha_rollback=0.01), "alpha_rollback"),
+        (PolicyLimits(max_alpha_promotion=0.01), "alpha_promotion"),
+        (PolicyLimits(required_guardrails=("calibration",)), "calibration"),
+        (PolicyLimits(min_label_window_seconds=3_600.0), "label_window_seconds"),
+    ],
+)
+def test_a_spec_that_breaches_a_floor_cannot_open_a_rollout(
+    service: tuple[ControlService, ControlStore, DemoRegistry],
+    spec: RolloutSpec,
+    limits: PolicyLimits,
+    expected: str,
+) -> None:
+    """A weak spec is the one thing the two-person rules do not cover, so the floors refuse it."""
+    control, store, registry = service
+    control.limits = limits
+    refusal = limits.refusal(spec)
+    assert refusal is not None
+    assert expected in refusal
+    with pytest.raises(AppError) as raised:
+        _start(control, registry, spec)
+    assert raised.value.status_code == 422
+    assert raised.value.code == "spec_refused"
+    assert store.open_rollout() is None
+    assert [entry.action for entry in store.audit_entries()] == ["champion_bootstrapped"]

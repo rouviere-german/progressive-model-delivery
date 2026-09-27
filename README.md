@@ -330,7 +330,11 @@ side.
 - **Separation of duties.** A deployer proposes, a release manager who is not the proposer
   approves the final promotion, and forcing a stage past its statistical gate needs two distinct
   release managers. Automatic rollback needs nobody. Every request, approval and execution is an
-  entry in a hash-chained log that carries the evidence it was based on.
+  entry in a hash-chained log that carries the evidence it was based on. Those rules cover
+  *decisions*, not the policy a rollout is judged against: a deployer proposes the spec alone, so
+  the control plane keeps configured floors under it -- `APP_MAX_SPEC_ALPHA`,
+  `APP_REQUIRED_GUARDRAILS`, and a maturation window at least as long as the router's label TTL --
+  and review covers what those floors do not.
 - **Shadow isolation.** No egress, no side-effect credentials, bounded queue, hard timeout,
   drop-on-overflow. Fault injection proves a crashing, hanging or erroring challenger costs
   dropped shadow jobs and nothing else.

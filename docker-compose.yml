@@ -122,6 +122,13 @@ services:
       # "<sha256 of API key>:<principal>:<role>[+<role>]" entries. A deployer proposes, a release
       # manager approves; the controller refuses a principal that holds both for one rollout.
       APP_ROLE_BINDINGS: ${APP_ROLE_BINDINGS:-}
+      # A deployer may propose any spec; these are the floors the control plane keeps under
+      # one. APP_LABEL_TTL_SECONDS is the router default (1 h), so a proposed spec must
+      # mature labels for at least that long.
+      APP_MAX_SPEC_ALPHA: "0.05"
+      APP_REQUIRED_GUARDRAILS: error_rate,worst_subgroup_error,latency_slo,log_loss
+      # Identifies this deployment in logs, metrics and audit actors; the controller
+      # lease adds a per-process suffix, so two replicas still elect one leader.
       APP_CONTROLLER_ID: controller-1
       APP_LEASE_SECONDS: "15"
       APP_RECONCILE_INTERVAL_SECONDS: "5"

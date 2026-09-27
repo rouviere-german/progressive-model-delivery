@@ -3,15 +3,24 @@
 DuckDB reads the Parquet segments and joins router predictions with shadow predictions and
 labels by request id. Only what was knowable at ``now`` is used (predictions with ``ts <= now``,
 labels with ``received_at <= now``), and label-dependent statistics use *matured* requests only:
-requests at least ``label_window_seconds`` old, whose labels (accepted only within that TTL)
-have all arrived. Evaluating matured cohorts in request order keeps outcome-dependent label
-delays (positives confirmed later than negatives) from biasing the comparison; see
-``docs/adr/0003-matured-cohorts-for-delayed-labels.md``. Requests whose label never arrived are
+requests at least ``label_window_seconds`` old whose label arrived inside that window. Evaluating
+matured cohorts in request order keeps outcome-dependent label delays (positives confirmed later
+than negatives) from biasing the comparison; see
+``docs/adr/0006-matured-cohorts-for-delayed-labels.md``. Requests whose label never arrived are
 excluded (assumed missing at random with respect to the arm). Latency statistics need no label
 and use every request.
 
+The window is enforced here rather than assumed: a label whose ``received_at`` is more than
+``label_window_seconds`` after its request is counted in ``late_labels_ignored`` and never enters a
+test, whatever the router's ``label_ttl_seconds`` happens to be. Without that, a TTL longer than the
+window would fold late labels into cohorts that were already scored as matured -- exactly the
+outcome-correlated bias the window exists to remove, and an e-process gaining increments for a past
+cohort. ``ControlService.propose`` refuses the mismatched configuration as well.
+
 The result is a deterministic function of the logs and ``now``, which is what makes controller
-reconciliation idempotent and replayable.
+reconciliation idempotent and replayable. Every per-request aggregate is order-independent
+(``min``, not ``any_value``), so duplicate rows cannot make the join depend on DuckDB's plan or on
+segment file order; duplicates are counted into the evidence instead of being silently collapsed.
 """
 
 from __future__ import annotations
@@ -53,7 +62,8 @@ _JOIN_SQL = """
     l AS ({label_cte}),
     s AS ({shadow_cte})
     SELECT p.stage_index, p.arm, p.subgroup, p.score, p.latency_ms, p.ts,
-           l.label, s.s_score, s.s_latency, {feature_cols}
+           l.label, l.label_at, l.label_rows, s.s_score, s.s_latency, s.shadow_rows,
+           {feature_cols}
     FROM p LEFT JOIN l USING (request_id) LEFT JOIN s USING (request_id)
     ORDER BY p.ts, p.request_id
 """
@@ -89,7 +99,9 @@ def _unmask(column: Any) -> npt.NDArray[Any]:
     ``np.asarray`` on such an array drops the mask and exposes *uninitialised* memory instead of
     the missing value. An unmatched outer join would then look like a real label of 0, which is a
     systematic bias against the better-calibrated model. Filling with NaN keeps "no label yet"
-    distinguishable; ``tests/unit/test_evidence_unmask.py`` pins this behaviour.
+    distinguishable;
+    ``tests/integration/test_evidence.py::test_unmask_turns_sql_nulls_into_nan_not_uninitialised_memory``
+    pins this behaviour.
     """
     if isinstance(column, np.ma.MaskedArray):
         if column.dtype.kind == "f":
@@ -154,8 +166,11 @@ class EvidenceReader:
             "latency_ms": np.zeros(0),
             "ts": np.zeros(0),
             "label": np.zeros(0),
+            "label_at": np.zeros(0),
+            "label_rows": np.zeros(0),
             "s_score": np.zeros(0),
             "s_latency": np.zeros(0),
+            "shadow_rows": np.zeros(0),
             **{f"f_{spec.name}": np.zeros(0) for spec in NUMERIC_FEATURES},
         }
         if not router:
@@ -163,22 +178,29 @@ class EvidenceReader:
         labels = self._files(self.labels_dir)
         shadow = self._files(self.shadow_dir)
         params: dict[str, Any] = {"router": router, "rid": rollout_id, "now": now}
-        label_cte = "SELECT NULL::VARCHAR AS request_id, NULL::DOUBLE AS label WHERE FALSE"
+        label_cte = (
+            "SELECT NULL::VARCHAR AS request_id, NULL::DOUBLE AS label, "
+            "NULL::DOUBLE AS label_at, NULL::DOUBLE AS label_rows WHERE FALSE"
+        )
         if labels:
             params["labels"] = labels
             label_cte = (
-                "SELECT request_id, CAST(any_value(label) AS DOUBLE) AS label "
+                "SELECT request_id, CAST(min(label) AS DOUBLE) AS label, "
+                "CAST(min(received_at) AS DOUBLE) AS label_at, "
+                "CAST(count(*) AS DOUBLE) AS label_rows "
                 "FROM read_parquet($labels) WHERE received_at <= $now GROUP BY request_id"
             )
         shadow_cte = (
             "SELECT NULL::VARCHAR AS request_id, NULL::DOUBLE AS s_score, "
-            "NULL::DOUBLE AS s_latency WHERE FALSE"
+            "NULL::DOUBLE AS s_latency, NULL::DOUBLE AS shadow_rows WHERE FALSE"
         )
         if shadow:
             params["shadow"] = shadow
             shadow_cte = (
-                "SELECT request_id, any_value(score) AS s_score, any_value(latency_ms) AS "
-                "s_latency FROM read_parquet($shadow) WHERE rollout_id = $rid AND ts <= $now "
+                "SELECT request_id, CAST(min(score) AS DOUBLE) AS s_score, "
+                "CAST(min(latency_ms) AS DOUBLE) AS s_latency, "
+                "CAST(count(*) AS DOUBLE) AS shadow_rows "
+                "FROM read_parquet($shadow) WHERE rollout_id = $rid AND ts <= $now "
                 "GROUP BY request_id"
             )
         query = _JOIN_SQL.format(
@@ -209,7 +231,13 @@ class EvidenceReader:
         label_raw = np.asarray(data["label"], dtype=np.float64)
         s_score = np.asarray(data["s_score"], dtype=np.float64)
         s_latency = np.asarray(data["s_latency"], dtype=np.float64)
-        labeled = ~np.isnan(label_raw) & (ts <= now - spec.label_window_seconds)
+        # A missing arrival time sorts as "infinitely late", so it can never pass the window.
+        label_at = np.nan_to_num(
+            np.asarray(data["label_at"], dtype=np.float64), nan=np.inf, posinf=np.inf
+        )
+        arrived = ~np.isnan(label_raw)
+        in_window = label_at <= ts + spec.label_window_seconds
+        labeled = arrived & in_window & (ts <= now - spec.label_window_seconds)
         label = np.nan_to_num(label_raw)
         has_shadow = ~np.isnan(s_score)
         on_challenger = arm == "challenger"
@@ -224,7 +252,14 @@ class EvidenceReader:
         latency_guardrails = [g for g in spec.guardrails if g.metric is Metric.LATENCY_SLO]
 
         stages: list[StageEvidence] = []
-        counts: dict[str, JsonValue] = {}
+        label_rows = np.nan_to_num(np.asarray(data["label_rows"], dtype=np.float64))
+        shadow_rows = np.nan_to_num(np.asarray(data["shadow_rows"], dtype=np.float64))
+        counts: dict[str, JsonValue] = {
+            # Observable poisoning attempts and configuration mistakes, in the audit evidence.
+            "late_labels_ignored": int(np.count_nonzero(arrived & ~in_window)),
+            "duplicate_label_requests": int(np.count_nonzero(label_rows > 1)),
+            "duplicate_shadow_requests": int(np.count_nonzero(shadow_rows > 1)),
+        }
         for window in record.stages:
             in_stage = stage == window.index
             if window.kind is StageKind.SHADOW:

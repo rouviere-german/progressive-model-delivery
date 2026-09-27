@@ -12,6 +12,11 @@ manager other than the proposer. Overrides (forcing a stage advance past its sta
 follow a two-person rule: they execute only once two *distinct* release managers have signed
 them, and they expire if the rollout moved on in the meantime. Every request, approval,
 refusal-worthy state and execution lands in the hash-chained audit log.
+
+One deployer proposing a weak policy is a real gap in that scheme -- the two-person rule covers
+overrides and promotion, not the spec a rollout is judged against -- so :class:`PolicyLimits` holds
+the floors an operator pins down in configuration, and :meth:`ControlService.propose` refuses a spec
+that breaches them.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ from progressive_model_delivery.core.errors import AppError
 from progressive_model_delivery.registry.release import ReleaseStore, ReleaseVerificationError
 from progressive_model_delivery.registry.signing import TrustStore
 
-__all__ = ["ControlService", "Principal", "Role", "RoleDirectory"]
+__all__ = ["ControlService", "PolicyLimits", "Principal", "Role", "RoleDirectory"]
 
 OVERRIDE_ACTIONS = frozenset({"force_advance"})
 REQUIRED_OVERRIDE_APPROVALS = 2
@@ -90,6 +95,53 @@ class RoleDirectory:
         return found
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyLimits:
+    """Floors the control plane puts under any proposed :class:`RolloutSpec`.
+
+    The defaults are permissive, so a service constructed without limits behaves as before;
+    :func:`~progressive_model_delivery.control.api.build_control_app` fills them from ``Settings``.
+
+    * ``max_alpha_rollback`` / ``max_alpha_promotion`` (``APP_MAX_SPEC_ALPHA``) cap the error budget
+      a spec may ask for. Uncapped, ``alpha_promotion: 0.4999`` parses and collapses the promotion
+      gate to almost nothing.
+    * ``required_guardrails`` (``APP_REQUIRED_GUARDRAILS``) names guardrails every rollout must
+      carry, so a spec cannot quietly drop the worst-subgroup test.
+    * ``min_label_window_seconds`` is the router's ``label_ttl_seconds``: the maturation window may
+      not be shorter than the window in which the router still accepts labels, or a late label would
+      land in a cohort the controller already scored as matured. The evidence reader drops such a
+      label as well; this refuses the configuration outright.
+    """
+
+    max_alpha_rollback: float = 0.5
+    max_alpha_promotion: float = 0.5
+    required_guardrails: tuple[str, ...] = ()
+    min_label_window_seconds: float = 0.0
+
+    def refusal(self, spec: RolloutSpec) -> str | None:
+        """Why this spec is refused, or ``None`` if it clears every floor."""
+        if spec.alpha_rollback > self.max_alpha_rollback:
+            return (
+                f"alpha_rollback {spec.alpha_rollback} is looser than the configured maximum "
+                f"{self.max_alpha_rollback}"
+            )
+        if spec.alpha_promotion > self.max_alpha_promotion:
+            return (
+                f"alpha_promotion {spec.alpha_promotion} is looser than the configured maximum "
+                f"{self.max_alpha_promotion}"
+            )
+        missing = sorted(set(self.required_guardrails) - {g.name for g in spec.guardrails})
+        if missing:
+            return "these guardrails are required but missing: " + ", ".join(missing)
+        if spec.label_window_seconds < self.min_label_window_seconds:
+            return (
+                f"label_window_seconds {spec.label_window_seconds} is shorter than the TTL the "
+                f"router accepts labels for ({self.min_label_window_seconds}), so a late label "
+                "would arrive after its cohort had matured"
+            )
+        return None
+
+
 def _forbid(message: str) -> AppError:
     return AppError(403, "forbidden", message)
 
@@ -99,10 +151,17 @@ def _conflict(message: str) -> AppError:
 
 
 class ControlService:
-    def __init__(self, control: ControlStore, releases: ReleaseStore, trust: TrustStore) -> None:
+    def __init__(
+        self,
+        control: ControlStore,
+        releases: ReleaseStore,
+        trust: TrustStore,
+        limits: PolicyLimits | None = None,
+    ) -> None:
         self.control = control
         self.releases = releases
         self.trust = trust
+        self.limits = limits if limits is not None else PolicyLimits()
 
     # --- helpers -----------------------------------------------------------------------------
 
@@ -136,6 +195,9 @@ class ControlService:
 
     def propose(self, principal: Principal, challenger: str, spec: RolloutSpec) -> RolloutRecord:
         self.require(principal, Role.DEPLOYER)
+        refusal = self.limits.refusal(spec)
+        if refusal is not None:
+            raise AppError(422, "spec_refused", f"The rollout spec is refused: {refusal}.")
         self._verified(challenger)
         try:
             with self.control.transaction() as conn:
