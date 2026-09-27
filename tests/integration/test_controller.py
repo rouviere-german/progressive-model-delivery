@@ -440,14 +440,41 @@ def test_only_the_lease_holder_reconciles(harness: Harness) -> None:
     assert rival.reconcile().outcome is not ReconcileOutcome.NOT_LEADER
     held = harness.control.lease_holder(LEASE_NAME)
     assert held is not None
-    assert held.holder == "c2"
+    # The holder string is the configured id plus a per-process suffix (see Controller.holder).
+    assert held.holder.startswith("c2:")
+    assert held.holder == rival.holder
     assert held.token == 2
+
+
+def test_two_controllers_from_the_same_settings_do_not_both_hold_the_lease(
+    harness: Harness,
+) -> None:
+    """``APP_CONTROLLER_ID`` names a deployment, so two processes of it share the string.
+
+    The lease has to separate them anyway: a second process (``docker compose up --scale
+    controller=2``, or a rolling restart whose old process has not exited) must see a live lease
+    held by somebody else and stand down.
+    """
+    _propose(harness, "feature_order_bug")
+    twin = Controller(
+        control=harness.control,
+        evidence=harness.controller.evidence,
+        releases=harness.controller.releases,
+        trust=harness.controller.trust,
+        controller_id=harness.controller.controller_id,
+        lease_seconds=60.0,
+    )
+    assert harness.controller.reconcile().outcome is not ReconcileOutcome.NOT_LEADER
+    assert twin.reconcile().outcome is ReconcileOutcome.NOT_LEADER
+    assert twin.holds_lease is False
+    assert harness.controller.reconcile().outcome is not ReconcileOutcome.NOT_LEADER
 
 
 def test_a_controller_that_lost_its_lease_cannot_write(harness: Harness) -> None:
     record = _propose(harness, "feature_order_bug")
     harness.run(2)
-    lease = harness.control.acquire_lease(LEASE_NAME, "c1", 60.0)
+    # Renew under the controller's own holder identity: this is the lease it is about to lose.
+    lease = harness.control.acquire_lease(LEASE_NAME, harness.controller.holder, 60.0)
     assert lease is not None
     harness.clock.advance(61.0)
     stolen = harness.control.acquire_lease(LEASE_NAME, "c2", 600.0)

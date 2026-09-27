@@ -35,7 +35,11 @@ than a redesign:
 - **The controller is already single-writer by construction**, via a SQLite lease with a monotonic
   fencing token that every write re-checks inside its transaction. Several controllers may run; only
   the lease holder acts, and a controller that lost its lease cannot write. That is the part that
-  genuinely must be exclusive, and it is the part that is tested for it.
+  genuinely must be exclusive, and it is the part that is tested for it. The lease holder identity is
+  per *process* (`APP_CONTROLLER_ID` plus a random suffix), not per configuration: a live lease is
+  renewed only by the process that took it, so scaling the controller service to two replicas -- or
+  overlapping a rolling restart -- leaves exactly one leader instead of two processes renewing the
+  same row.
 - **Serving state is read, not held.** Each router re-reads the champion, challenger and weight from
   the control database every `state_refresh_seconds`. There is no push, no invalidation and no
   cache coherence problem -- only a bounded staleness window.

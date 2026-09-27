@@ -2,7 +2,8 @@
 
 One pass (:meth:`Controller.reconcile`):
 
-1. Take or renew the SQLite lease; a controller without the lease does nothing.
+1. Take or renew the SQLite lease under a per-process holder identity; a controller without the
+   lease does nothing, including a second process of the same ``APP_CONTROLLER_ID``.
 2. Read the open rollout and the signature-verified manifests of champion and challenger.
 3. Collect per-stage evidence from the logs as of ``now`` (matured labels only), evaluate every
    guardrail e-value and apply the stage rule (:func:`~.guardrails.decide`).
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import math
 import threading
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -133,6 +135,16 @@ class Controller:
         self.releases = releases
         self.trust = trust
         self.controller_id = controller_id
+        self.holder = f"{controller_id}:{uuid.uuid4().hex}"
+        """The lease holder identity: the configured id plus a per-process suffix.
+
+        ``acquire_lease`` treats a live lease held by the *same* string as a renewal, which is what
+        makes crash recovery cheap. ``controller_id`` comes from configuration
+        (``APP_CONTROLLER_ID``, ``controller-1`` by default and also set in ``docker-compose.yml``),
+        so two processes of one deployment share it; without the suffix both would renew the same
+        lease and both would believe they lead. The configured id still labels logs, metrics and
+        audit actors.
+        """
         self.lease_seconds = lease_seconds
         self.metrics = metrics
         self.last_report: ReconcileReport | None = None
@@ -147,7 +159,7 @@ class Controller:
         return report
 
     def _reconcile(self) -> ReconcileReport:
-        lease = self.control.acquire_lease(LEASE_NAME, self.controller_id, self.lease_seconds)
+        lease = self.control.acquire_lease(LEASE_NAME, self.holder, self.lease_seconds)
         self.holds_lease = lease is not None
         if lease is None:
             return ReconcileReport(ReconcileOutcome.NOT_LEADER)
