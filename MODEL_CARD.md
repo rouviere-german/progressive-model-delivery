@@ -73,11 +73,14 @@ For a healthy release the two agree. For a release with a pipeline bug they do n
 | `champion` | pipeline = live | 0.1254 | 0.2908 | 0.8889 | 0.0892 | 0.1753 |
 | `better` | pipeline = live | 0.1114 | 0.2573 | 0.9128 | 0.0798 | 0.1340 |
 | `identical` | pipeline = live | 0.1254 | 0.2908 | 0.8889 | 0.0892 | 0.1753 |
-| `worse` | pipeline = live | 0.1594 | 0.3767 | 0.8278 | 0.1154 | 0.2138 |
+| `worse` | pipeline = live | 0.1593 | 0.3767 | 0.8278 | 0.1154 | 0.2138 |
 | `subgroup_worse` | **pipeline** | 0.1124 | 0.2571 | 0.9126 | 0.0793 | **0.1307** |
 | `subgroup_worse` | **live** | 0.1232 | 0.2859 | 0.8929 | 0.0879 | **0.2196** |
 | `feature_order_bug` | **pipeline** | 0.1114 | 0.2573 | 0.9128 | 0.0798 | **0.1340** |
 | `feature_order_bug` | **live** | 0.1915 | 0.6337 | 0.5963 | 0.1567 | **0.2565** |
+
+`worse`'s error rate is exactly 0.15935 and sits on a rounding boundary: four decimals of it are
+0.1593, which is what the reproducing command prints and what the table says.
 
 Read the last four rows carefully:
 

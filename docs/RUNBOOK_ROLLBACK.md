@@ -92,7 +92,14 @@ Three causes, in order of likelihood:
 - **`minimums_met == false`.** Not enough matured samples or not enough wall time yet. Compare
   `stage_samples` against the stage's `min_samples` and `stage_elapsed_seconds` against its
   `min_duration_seconds`. If sample counts are far below traffic volume, suspect the label path
-  (§6 and `app_feedback_total{outcome=...}`): labels that never arrive never mature.
+  (§6 and `app_feedback_total{outcome=...}`): labels that never arrive never mature. Two more
+  reasons live in the evidence `counts`: `late_labels_ignored` (labels that arrived after their
+  request's maturation window and were refused as evidence -- check `APP_LABEL_TTL_SECONDS` against
+  the spec's `label_window_seconds`) and the gap between `challenger_served` and
+  `challenger_subjects`, which is repeat traffic: evidence counts each customer once per stage, so a
+  stream dominated by heavy users matures far slower than its request count suggests. Non-zero
+  `duplicate_label_requests` or `duplicate_shadow_requests` means something wrote a request id
+  twice, which is worth a look at the feedback path.
 - **Non-inferiority not proven.** The stage requires it and the e-value has not crossed
   `1/alpha_promotion`. This is the test saying "not enough evidence yet", which on a genuinely
   equal model can take a while. Waiting is the correct action.

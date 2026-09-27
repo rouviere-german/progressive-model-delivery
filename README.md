@@ -188,9 +188,11 @@ the controller asks for promotion, the proposer is refused, and a release manage
 reproducible: two seeded runs agree on every number above (only the rollout ids and the freshly
 generated signing key differ). `tasks.py demo` and a deployment draw a random salt per rollout on
 purpose, so the same customers are not always the test group -- then the *outcomes* are still
-deterministic and the tests assert them, while the canary magnitudes move with the partition. Across
-unseeded runs on this box the challenger served 1,181-1,263 requests, the `error_rate` e-value at
-promotion ranged log_e 4.80-6.15 and `log_loss` 13.66-15.23. The rollback scenario is identical in
+deterministic and the tests assert them, while the canary magnitudes move a lot with the partition.
+Across three unseeded runs on this box the challenger served 1,263, 2,014 and 2,113 requests, the
+`error_rate` e-value at promotion was log_e 6.15, 6.85 and 7.97, and `log_loss` 13.66, 14.63 and
+28.25 -- a factor of two in a log quantity, against 1,181 / 4.80 / 15.23 for the seeded run above.
+Only the decision is stable; that is what the tests assert. The rollback scenario is identical in
 every run, seeded or not: it finishes during the shadow stage, where both models score every request
 and there is no partition to draw.
 
@@ -208,14 +210,15 @@ scripts/compose_e2e.sh                   # the end-to-end assertions CI runs
 
 All numbers below are the output of `bench/` scripts on this machine: Windows 10, 6 CPUs,
 Intel i7-8700 class, CPU-only, Python 3.12.14, NumPy 2.5.3. Every table is pasted from a real run;
-the command is above it. `bench/thresholds.json` holds the regression gates CI enforces.
+the command is above it, and the wall times were measured with other work on the box, so they are
+upper bounds. `bench/thresholds.json` holds the regression gates CI enforces.
 
 ### Validity under continuous monitoring
 
 `uv run python bench/bench_validity.py --check` (about 2 min wall)
 
 ```
-2000 rollouts x up to 90 looks (2000 requests each) in 97.2 s
+2000 rollouts x up to 90 looks (2000 requests each) in 99.3 s
 | measurement | rate | 95% CI | budget |
 |---|---|---|---|
 | A/A false rollback (anytime-valid) | 0.0060 | [0.0031, 0.0105] | alpha_rollback = 0.025 |
@@ -257,7 +260,7 @@ five-requests-per-customer traffic carries about a fifth of the evidence it appe
 `uv run python bench/bench_power.py --check` (about 45 s wall)
 
 ```
-400 rollouts per scenario, up to 60 looks of 2000 requests, in 39.6 s
+400 rollouts per scenario, up to 60 looks of 2000 requests, in 37.2 s
 | scenario | detected | median looks | median exposure | canary-only exposure | fixed horizon (80%) |
 |---|---|---|---|---|---|
 | error_+1pp | 1.000 | 2 | 0 | 12571 | 51,165 |
@@ -280,36 +283,62 @@ pays for it on `subgroup_worse`, where it detects 87.5% rather than 100%.
 
 ### The cost of the shadow path
 
-`uv run python bench/bench_serving.py --check` (about 27 s wall)
+`uv run python bench/bench_serving.py --check` (about 45 s wall)
 
 ```
 POST /v1/predict, 2000 requests per mode (in-process test client)
 | mode | p50 (us) | p95 (us) | p99 (us) | added p99 (ms) | failed | shadow jobs |
 |---|---|---|---|---|---|---|
-| champion_only | 1490.8 | 2181.1 | 2571.4 | +0.0000 | 0 | - |
-| shadow_in_process | 3889.8 | 5112.0 | 5777.6 | +3.2062 | 0 | delivered=2200, dropped=0, enqueued=2200 |
-| shadow_hanging | 1939.4 | 2815.2 | 4686.5 | +2.1151 | 0 | delivered=0, dropped=1640, enqueued=560, failed=44 |
+| champion_only | 1794.6 | 3012.1 | 3642.1 | +0.0000 | 0 | - |
+| shadow_stub | 3517.0 | 4998.2 | 5792.4 | +2.1503 | 0 | delivered=2200, dropped=0, enqueued=2200 |
+| shadow_in_process | 4204.4 | 6001.3 | 6760.0 | +3.1179 | 0 | delivered=2200, dropped=0, enqueued=2200 |
+| shadow_hanging | 2126.7 | 3749.4 | 4960.4 | +1.3183 | 0 | delivered=0, dropped=1632, enqueued=568, failed=52 |
 
 | request-path operation | runs | p50 (us) | p99 (us) |
 |---|---|---|---|
 | forwarder_offer_queued | 20000 | 1.6 | 1.9 |
-| forwarder_offer_dropped | 20000 | 1.2 | 1.5 |
+| forwarder_offer_dropped | 20000 | 1.1 | 1.3 |
+| stub_shadow_round_trip | 2000 | 1127.5 | 2740.3 |
+
+POST /v1/predict, champion only, N requests in flight at once (scoring off the loop)
+| clients | runs | p50 (us) | p99 (us) | throughput (req/s) | failed |
+|---|---|---|---|---|---|
+| 1 | 500 | 2274.3 | 3875.4 | 400.8 | 0 |
+| 8 | 496 | 18901.7 | 35530.8 | 412.3 | 0 |
 ```
 
-The only shadow work on the customer's request path is the enqueue: **p99 1.9 us**, and 1.5 us on
+The only shadow work on the customer's request path is the enqueue: **p99 1.9 us**, and 1.3 us on
 the drop path. That is the number CI gates (50 us), and it is stable across runs.
 
-A shadow worker that never answers costs **0 failed requests** and 1,640 dropped jobs out of 2,200.
+A shadow worker that never answers costs **0 failed requests** and 1,632 dropped jobs out of 2,200.
 The champion's own percentiles move a little -- across four runs of this table, `shadow_hanging`
-added 0.4-0.6 ms at p50 and 0.4-2.1 ms at p99. That spread is the timeout path competing for the
-same event loop on a 6-CPU Windows box, not a trend; the gates are set at 3 ms (p50) and 10 ms (p99)
-for that reason. The claim this table supports is the one about failed requests, which is exact.
+added 0.09-0.26 ms at p50 and 0.15-2.59 ms at p99. That spread is the timeout path competing for the
+same event loop on a 6-CPU Windows box, not a trend; the gates sit at 1 ms (p50) and 5 ms (p99),
+about twice the worst run. The claim this table supports is the one about failed requests, which is
+exact.
+
+`shadow_stub` is the forwarding cost with the worker's compute taken out: the real `ShadowForwarder`
+and the real HTTP sender against an ASGI app that answers 202 and does nothing else. It adds p50
+about 1.7 ms and p99 2.15-2.65 ms across runs -- and the `stub_shadow_round_trip` row says why: one
+in-process `httpx` request to that do-nothing app costs p50 1.1-1.5 ms by itself. That is this
+benchmark's shape rather than the forwarder's cost, and it is why the "shadow forwarding adds < 1 ms
+to champion p99" goal is not measurable here (see Non-goals): a separate container is not an ASGI
+transport in the same process. What CI gates is the request path (50 us) and this mode at the
+measured p50 3 ms / p99 4 ms.
 
 `shadow_in_process` is reported and deliberately *not* claimed as the production cost. It mounts
 the shadow worker on the router's own event loop, so its signature verification, LightGBM scoring
-and Parquet writing compete with the request being timed -- +3.3 ms p99 is the cost of sharing one
-process, not the cost of forwarding. The deployed topology gives the worker its own container, and
+and Parquet writing compete with the request being timed -- +3.1 ms p99 is the cost of sharing one
+process, not the cost of forwarding; the gap to `shadow_stub` is roughly what the worker's own
+compute costs. The deployed topology gives the worker its own container, and
 `scripts/compose_e2e.sh` is what checks that boundary.
+
+Scoring runs in a worker thread (`asyncio.to_thread`), not on the event loop, so a blocking LightGBM
+call cannot stall the refresh loop, the flush loop or the forwarder's delivery tasks. The concurrency
+rows show what that does and does not buy on this box: throughput is flat within its noise (1 client
+239-401 req/s, 8 clients 302-412 req/s across four runs) while p99 grows with the queue, because
+single-row LightGBM scoring holds the GIL. Concurrency here buys a shorter loop, not parallel
+scoring.
 
 ### Hot paths
 
@@ -318,24 +347,27 @@ process, not the cost of forwarding. The deployed topology gives the worker its 
 ```
 | benchmark | runs | p50 (us) | p95 (us) |
 |---|---|---|---|
-| subject_hash | 50000 | 5.1 | 5.8 |
-| assignment | 50000 | 2.0 | 2.3 |
-| beta_mixture_e_value | 5000 | 76.5 | 166.0 |
-| paired_msprt | 5000 | 40.1 | 69.7 |
-| reconcile_decision_5_stages | 300 | 5864.5 | 15373.9 |
-| audit_append_one_entry | 200 | 7207.7 | 14289.2 |
-| audit_verify_1000_entries | 10 | 30080.3 | 44897.4 |
-| psi_10k_vs_10k | 200 | 255.2 | 517.1 |
-| drift_check_10k_vs_10k | 30 | 2602.1 | 4918.6 |
+| redact_text_1kb | 2000 | 339.0 | 446.8 |
+| rate_limiter_check | 20000 | 1.8 | 1.9 |
+| subject_hash | 50000 | 5.1 | 5.5 |
+| assignment | 50000 | 2.0 | 2.1 |
+| beta_mixture_e_value | 5000 | 75.6 | 94.6 |
+| paired_msprt | 5000 | 40.5 | 49.9 |
+| reconcile_decision_5_stages | 300 | 4365.8 | 5912.5 |
+| audit_append_one_entry | 200 | 6727.6 | 8327.6 |
+| audit_verify_1000_entries | 10 | 27938.8 | 35195.3 |
+| psi_10k_vs_10k | 200 | 245.6 | 288.8 |
+| drift_check_10k_vs_10k | 30 | 2620.8 | 3319.5 |
 ```
 
-A whole reconciliation decision -- every guardrail over five stages and every subgroup -- costs
-about 6 ms at p50, so the loop can run every few seconds without thinking about it. The p95 on this
-box is noisy (4.6-15 ms across runs, hence the 40 ms gate); nothing here depends on the tail.
+A whole reconciliation decision -- every guardrail over five stages and every subgroup -- costs 4-6 ms
+at p50 across runs, so the loop can run every few seconds without thinking about it. The p95 on this
+box is noisy (5.9-15.4 ms across runs, hence the 40 ms gate); nothing here depends on the tail.
 
 ### Tests
 
-512 tests, over 97% line-and-branch coverage (`uv run python tasks.py test`, floor 85%). 27 of them
+544 tests, 97.5% line-and-branch coverage (`uv run python tasks.py test`, floor 85%; 7m49s on this
+box). 27 of them
 are hypothesis properties: that the e-value mixture is a supermartingale under every null rate,
 that harm evidence is monotone in challenger-only failures, that random action sequences on the
 lifecycle only ever traverse legal edges, that assignment is sticky as the weight rises and splits
