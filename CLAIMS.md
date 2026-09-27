@@ -121,7 +121,7 @@ exist. Local commands run offline; rows marked **CI** are verified only in GitHu
 
 | # | Claim | Evidence | Reproduce |
 |---|---|---|---|
-| 69 | Line+branch coverage is at least 85% (measured 97%). | `.github/workflows/ci.yml#test` | `uv run python tasks.py test` |
+| 69 | Line+branch coverage is at least 85% (measured 97.4-97.5% over 512 tests). | `.github/workflows/ci.yml#test` | `uv run python tasks.py test` |
 | 70 | Every baseline file, README section, CI job and evidence reference above is present. | `scripts/check_baseline.py`, `.github/workflows/ci.yml#baseline` | `uv run python tasks.py baseline` |
 | 71 | README numbers come from the bench scripts, which CI runs against the regression thresholds in `bench/thresholds.json`. | `bench/bench_baseline.py`, `bench/bench_validity.py`, `bench/bench_power.py`, `bench/bench_serving.py`, `.github/workflows/ci.yml#bench`, `.github/workflows/ci.yml#simulation` | `uv run python tasks.py bench` |
 | 72 | The image builds, runs as UID 10001 with a read-only root filesystem, and its Python HEALTHCHECK reports healthy; it has no fixable HIGH/CRITICAL CVEs and ships a CycloneDX SBOM. | `.github/workflows/ci.yml#docker` | **CI** only |

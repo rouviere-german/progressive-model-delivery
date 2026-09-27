@@ -310,7 +310,7 @@ box is noisy (4.6-15 ms across runs, hence the 40 ms gate); nothing here depends
 
 ### Tests
 
-512 tests, 97.4% line-and-branch coverage (`uv run python tasks.py test`, floor 85%). 27 of them
+512 tests, over 97% line-and-branch coverage (`uv run python tasks.py test`, floor 85%). 27 of them
 are hypothesis properties: that the e-value mixture is a supermartingale under every null rate,
 that harm evidence is monotone in challenger-only failures, that random action sequences on the
 lifecycle only ever traverse legal edges, that assignment is sticky as the weight rises and splits
